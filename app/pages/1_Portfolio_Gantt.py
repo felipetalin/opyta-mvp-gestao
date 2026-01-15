@@ -8,177 +8,113 @@ from datetime import date, timedelta
 from services.auth import require_login
 from services.supabase_client import get_authed_client
 
+# -------------------------------------------------
+# Configuração básica
+# -------------------------------------------------
 st.set_page_config(page_title="Portfólio (Gantt)", layout="wide")
-st.title("Portfólio (Gantt) — MOCK")
+st.title("Portfólio (Gantt)")
 
-# Mantém como está (sem mexer em conexão)
 require_login()
 sb = get_authed_client()
 
-# -----------------------------
-# Helpers
-# -----------------------------
-def month_range(d: date):
-    first = d.replace(day=1)
-    if first.month == 12:
-        nxt = first.replace(year=first.year + 1, month=1, day=1)
-    else:
-        nxt = first.replace(month=first.month + 1, day=1)
-    last = nxt - timedelta(days=1)
-    return first, last
-
-def abbreviate_name(name: str) -> str:
-    """Ex.: 'Ismayllen Masson' -> 'I. Masson'; 'Felipe' -> 'Felipe'."""
-    if not name:
-        return ""
-    parts = [p for p in str(name).split() if p.strip()]
-    if len(parts) <= 1:
-        return parts[0] if parts else ""
-    return f"{parts[0][0]}. {parts[-1]}"
-
-def pt_weekday_letter(d: date) -> str:
-    # Monday=0 ... Sunday=6  -> STQQSSD
-    letters = ["S", "T", "Q", "Q", "S", "S", "D"]
-    return letters[d.weekday()]
-
-# -----------------------------
-# Carregar dados da VIEW
-# -----------------------------
+# -------------------------------------------------
+# Carregar dados
+# -------------------------------------------------
 @st.cache_data(ttl=30)
-def fetch_portfolio_view():
+def fetch_portfolio():
     res = sb.table("v_portfolio_tasks").select("*").execute()
     return pd.DataFrame(res.data or [])
 
-df = fetch_portfolio_view()
+df = fetch_portfolio()
 
 if df.empty:
-    st.warning("Nenhuma tarefa encontrada na view v_portfolio_tasks.")
+    st.info("Nenhuma tarefa encontrada.")
     st.stop()
 
-# -----------------------------
-# Normalização de datas
-# -----------------------------
-df["start_date"] = pd.to_datetime(df.get("start_date"), errors="coerce")
-df["end_date"] = pd.to_datetime(df.get("end_date"), errors="coerce")
-
-# Se end_date estiver vazio, assume start_date (tarefa 1 dia)
+# -------------------------------------------------
+# Normalização
+# -------------------------------------------------
+df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
+df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
 df["end_date"] = df["end_date"].fillna(df["start_date"])
+df = df.dropna(subset=["start_date", "end_date"])
 
-df = df.dropna(subset=["start_date", "end_date"]).copy()
-if df.empty:
-    st.warning("Existem registros, mas sem start_date/end_date válidos.")
-    st.stop()
+df["assignee_name"] = df["assignee_name"].fillna("Gestão de Projetos")
 
-# Campos “opcionais” com fallback
-if "assignee_name" not in df.columns:
-    df["assignee_name"] = "Gestao de Projetos"
-else:
-    df["assignee_name"] = df["assignee_name"].fillna("Gestao de Projetos")
+df["label"] = (
+    df["project_code"].fillna("") + " | " + df["title"].fillna("")
+).str.strip(" |")
 
-if "project_code" not in df.columns:
-    df["project_code"] = ""
-
-if "title" not in df.columns:
-    df["title"] = ""
-
-if "tipo_atividade" not in df.columns:
-    df["tipo_atividade"] = "CAMPO"
-
-# Label do eixo Y igual mock: COD | Título
-df["label"] = (df["project_code"].astype(str).fillna("") + " | " + df["title"].astype(str).fillna("")).str.strip(" |")
-
-# -----------------------------
-# Filtros (mock)
-# -----------------------------
+# -------------------------------------------------
+# Filtros (layout mock)
+# -------------------------------------------------
 today = date.today()
-d0, d1 = month_range(today)
+first_day = date(today.year, today.month, 1)
+next_month = first_day.replace(day=28) + timedelta(days=4)
+last_day = next_month - timedelta(days=next_month.day)
 
-projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if str(p).strip() != ""])
-types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if str(t).strip() != ""])
-people_all = sorted([p for p in df["assignee_name"].dropna().unique().tolist() if str(p).strip() != ""])
-
-# defaults do mock (se existirem)
-default_types = [t for t in ["CAMPO", "RELATORIO"] if t in types_all] or types_all
-default_people = people_all  # começa com todos
-
-c1, c2, c3, c4 = st.columns([1.2, 1.3, 1.6, 1.2])
+c1, c2, c3, c4 = st.columns([1.6, 2.2, 2.8, 2.2])
 
 with c1:
-    sel_project = st.selectbox("Projeto", projects, index=0)
+    project_sel = st.selectbox(
+        "Projeto",
+        ["Todos"] + sorted(df["project_code"].dropna().unique().tolist()),
+    )
 
 with c2:
-    sel_types = st.multiselect("Tipo Atividade", types_all, default=default_types)
+    type_sel = st.multiselect(
+        "Tipo Atividade",
+        sorted(df["tipo_atividade"].dropna().unique().tolist()),
+        default=sorted(df["tipo_atividade"].dropna().unique().tolist()),
+    )
 
 with c3:
-    sel_people = st.multiselect("Profissionais", people_all, default=default_people)
+    people_sel = st.multiselect(
+        "Profissionais",
+        sorted(df["assignee_name"].unique().tolist()),
+        default=sorted(df["assignee_name"].unique().tolist()),
+    )
 
 with c4:
-    period = st.date_input("Período", value=(d0, d1), format="DD/MM/YYYY")
-    if isinstance(period, tuple) and len(period) == 2:
-        p_start, p_end = period
-    else:
-        p_start, p_end = d0, d1
+    period = st.date_input(
+        "Período",
+        value=(first_day, last_day),
+        format="DD/MM/YYYY",
+    )
 
-# converte período
-p_start_dt = pd.to_datetime(p_start)
-# inclui o dia final inteiro
-p_end_dt = pd.to_datetime(p_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-
-# -----------------------------
-# Aplicar filtros
-# -----------------------------
-f = df.copy()
-
-if sel_project != "Todos":
-    f = f[f["project_code"] == sel_project]
-
-if sel_types:
-    f = f[f["tipo_atividade"].isin(sel_types)]
-else:
-    f = f.iloc[0:0]
-
-if sel_people:
-    f = f[f["assignee_name"].isin(sel_people)]
-else:
-    f = f.iloc[0:0]
-
-# interseção com janela
-f = f[(f["start_date"] <= p_end_dt) & (f["end_date"] >= p_start_dt)].copy()
-
-if f.empty:
-    st.info("Ainda não há tarefas no portfólio (ou os filtros zeraram a lista).")
+if not isinstance(period, tuple):
     st.stop()
 
-# Recorte visual (clamp) para melhorar plot
-f["plot_start"] = f["start_date"].clip(lower=p_start_dt)
-f["plot_end"] = f["end_date"].clip(upper=p_end_dt)
+p_start, p_end = map(pd.to_datetime, period)
 
-# Ordenação cronológica (eixo Y)
-order = (
-    f.groupby("label")["plot_start"]
-    .min()
-    .sort_values(ascending=True)
-    .index
-    .tolist()
-)
+# -------------------------------------------------
+# Aplicar filtros
+# -------------------------------------------------
+f = df.copy()
 
-# Texto dentro da barra: nome ou abreviado se muito curto
-f["dur_days"] = (f["plot_end"] - f["plot_start"]).dt.days + 1
-f["bar_text"] = f["assignee_name"].astype(str)
-short_mask = f["dur_days"] <= 2
-f.loc[short_mask, "bar_text"] = f.loc[short_mask, "assignee_name"].astype(str).map(abbreviate_name)
+f = f[(f["start_date"] <= p_end) & (f["end_date"] >= p_start)]
 
-# -----------------------------
-# Cores (verde escuro / verde claro)
-# -----------------------------
+if project_sel != "Todos":
+    f = f[f["project_code"] == project_sel]
+
+f = f[f["tipo_atividade"].isin(type_sel)]
+f = f[f["assignee_name"].isin(people_sel)]
+
+if f.empty:
+    st.info("Nenhuma tarefa para os filtros selecionados.")
+    st.stop()
+
+f["plot_start"] = f["start_date"].clip(lower=p_start)
+f["plot_end"] = f["end_date"].clip(upper=p_end)
+
+# -------------------------------------------------
+# GANTT
+# -------------------------------------------------
 color_map = {
-    "CAMPO": "#1B5E20",       # verde escuro
-    "RELATORIO": "#66BB6A",   # verde claro
+    "CAMPO": "#1B5E20",
+    "RELATORIO": "#66BB6A",
 }
 
-# -----------------------------
-# Gantt
-# -----------------------------
 fig = px.timeline(
     f,
     x_start="plot_start",
@@ -186,87 +122,77 @@ fig = px.timeline(
     y="label",
     color="tipo_atividade",
     color_discrete_map=color_map,
-    text="bar_text",
-    hover_data={
-        "project_code": True,
-        "title": True,
-        "assignee_name": True,
-        "tipo_atividade": True,
-        "start_date": True,
-        "end_date": True,
-        "plot_start": False,
-        "plot_end": False,
-        "label": False,
-    },
+    text="assignee_name",
+    hover_data=[
+        "project_code",
+        "project_name",
+        "title",
+        "assignee_name",
+        "status",
+        "date_confidence",
+        "start_date",
+        "end_date",
+    ],
 )
 
-# Ordem do eixo Y (cronológica)
-fig.update_yaxes(categoryorder="array", categoryarray=order, title_text="Projeto / Tarefa", autorange="reversed")
+fig.update_yaxes(autorange="reversed", title="Projeto / Tarefa")
 
-# Texto dentro da barra
 fig.update_traces(
     textposition="inside",
     insidetextanchor="middle",
     cliponaxis=False,
 )
 
-# Range do eixo X
-fig.update_xaxes(range=[p_start_dt, p_end_dt])
-
-# Ticks diários no formato do mock (vertical)
-days = pd.date_range(p_start_dt.date(), p_end_dt.date(), freq="D")
-tickvals = [pd.to_datetime(d) for d in days]
-ticktext = [f"{pt_weekday_letter(d.date())} {d.day:02d}/{d.month:02d}" for d in days]
+# -------------------------------------------------
+# Eixo X diário + fins de semana
+# -------------------------------------------------
+days = pd.date_range(p_start, p_end, freq="D")
 
 fig.update_xaxes(
-    tickmode="array",
-    tickvals=tickvals,
-    ticktext=ticktext,
+    range=[p_start, p_end],
     tickangle=-90,
     showgrid=True,
-    gridcolor="rgba(0,0,0,0.06)",
-    title_text="",
+    gridcolor="rgba(0,0,0,0.05)",
 )
 
-# Faixas de fim de semana (bem claro)
 shapes = []
 for d in days:
-    if d.weekday() >= 5:  # sábado/domingo
-        x0 = pd.to_datetime(d.date())
-        x1 = x0 + pd.Timedelta(days=1)
+    if d.weekday() >= 5:
         shapes.append(
             dict(
                 type="rect",
                 xref="x",
                 yref="paper",
-                x0=x0,
-                x1=x1,
+                x0=d,
+                x1=d + timedelta(days=1),
                 y0=0,
                 y1=1,
-                fillcolor="rgba(102,187,106,0.10)",
+                fillcolor="rgba(102,187,106,0.12)",
                 line=dict(width=0),
                 layer="below",
             )
         )
-fig.update_layout(shapes=shapes)
 
-# Legenda em cima, central
 fig.update_layout(
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, title_text=""),
-    margin=dict(l=10, r=10, t=60, b=40),
+    shapes=shapes,
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="center",
+        x=0.5,
+        title="",
+    ),
+    height=max(450, 80 + f["label"].nunique() * 55),
+    margin=dict(l=10, r=10, t=50, b=40),
 )
 
-# Altura dinâmica
-row_count = f["label"].nunique()
-fig.update_layout(height=max(420, 80 + row_count * 55))
-
+# -------------------------------------------------
+# Render
+# -------------------------------------------------
 st.plotly_chart(fig, use_container_width=True)
 
 with st.expander("Dados (opcional)"):
-    st.dataframe(
-        f.sort_values(["plot_start", "plot_end"], na_position="last"),
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(f, use_container_width=True, hide_index=True)
 
 
