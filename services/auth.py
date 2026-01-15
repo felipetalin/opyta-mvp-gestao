@@ -1,32 +1,19 @@
 import streamlit as st
-from services.supabase_client import get_supabase
+from services.supabase_client import get_public_client
+
 
 def login(email: str, password: str):
-    sb = get_supabase()
+    sb = get_public_client()
     res = sb.auth.sign_in_with_password({"email": email, "password": password})
-    st.session_state["sb_session"] = res.session
-    st.session_state["sb_user"] = res.user
+
+    # salva sessão pro resto do app
+    st.session_state["sb_access_token"] = res.session.access_token
+    st.session_state["sb_refresh_token"] = res.session.refresh_token
+    st.session_state["sb_user_id"] = res.user.id
+    st.session_state["sb_email"] = res.user.email
+
 
 def logout():
-    sb = get_supabase()
-    try:
-        sb.auth.sign_out()
-    except Exception:
-        pass
-    st.session_state["sb_session"] = None
-    st.session_state["sb_user"] = None
-
-def require_login():
-    if st.session_state.get("sb_session") is None:
-        st.warning("Faça login na Home.")
-        st.stop()
-
-def inject_session():
-    """
-    Injeta o access_token no PostgREST para as chamadas obedecerem RLS.
-    """
-    sb = get_supabase()
-    sess = st.session_state.get("sb_session")
-    if sess and getattr(sess, "access_token", None):
-        sb.postgrest.auth(sess.access_token)
-    return sb
+    # limpa sessão
+    for k in ["sb_access_token", "sb_refresh_token", "sb_user_id", "sb_email"]:
+        st.session_state.pop(k, None)

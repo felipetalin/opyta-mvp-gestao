@@ -3,12 +3,12 @@ import pandas as pd
 from datetime import date
 from dotenv import load_dotenv
 
-from services.supabase_client import get_supabase
+from services.supabase_client import get_authed_client
 
-st.set_page_config(page_title="Tarefas", layout="wide")
-load_dotenv()
-
-sb = get_supabase()
+sb = get_authed_client()
+if not sb:
+    st.warning("Faça login para acessar.")
+    st.stop()
 
 CONF_VALUES = ["ESTIMADO", "CONFIRMADO"]
 TIPO_VALUES = ["CAMPO", "RELATORIO", "ADMINISTRATIVO"]
