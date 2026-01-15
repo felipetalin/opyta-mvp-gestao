@@ -92,9 +92,11 @@ if isinstance(last_day, datetime):
     with c4:
         people_sel = st.selectbox("Profissional", ["(Todos)"] + people_opts)
 
-# aplica filtros
+# --- filtro de período (interseção) ---
+# Garantia: start_filter/end_filter existem (date_input "De" e "Até")
 mask = (df["start_date"].dt.date <= end_filter) & (df["end_date"].dt.date >= start_filter)
 df_f = df.loc[mask].copy()
+
 
 if proj_sel != "(Todos)" and "project_code" in df_f.columns:
     df_f = df_f[df_f["project_code"] == proj_sel]
