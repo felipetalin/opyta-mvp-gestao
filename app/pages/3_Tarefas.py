@@ -247,50 +247,100 @@ if reload_btn:
     refresh_all()
     st.rerun()
 
+def _get(row, *keys, default=""):
+    """Pega um campo de uma Series (row) aceitando variações de nome."""
+    for k in keys:
+        if k in row.index:
+            v = row[k]
+            return "" if pd.isna(v) else v
+    return default
 
-def apply_updates(before_df: pd.DataFrame, after_df: pd.DataFrame):
-    """Compara linhas e atualiza apenas o que mudou."""
-    # Indexa por id
-    b = before_df.set_index("id")
-    a = after_df.rename(columns={"Tarefa": "title", "Início": "start_date", "Fim": "end_date"}).set_index("id")
+def apply_updates(before_df: pd.DataFrame, after_df: pd.DataFrame) -> int:
+    """
+    Compara before/after (data_editor) e aplica UPDATE no Supabase.
+    Retorna quantas alterações foram aplicadas.
+    """
+    updates = 0
 
-    changed = []
-    for task_id in a.index:
-        row_a = a.loc[task_id]
-        row_b = b.loc[task_id]
+    # garante que existe ID (obrigatório pra update)
+    if "ID" not in before_df.columns or "ID" not in after_df.columns:
+        st.error("A tabela de edição precisa ter a coluna 'ID'.")
+        return 0
 
-        # campos relevantes
-        fields = {
-            "title": (str(row_a["title"]).strip(), str(row_b["title"]).strip()),
-            "tipo_atividade": (str(row_a["Tipo"]).strip(), str(row_b["Tipo"]).strip()),
-            "assignee_id": (
-                str(people_id_by_name.get(str(row_a["Responsável"]), "")),
-                str(row_b.get("assignee_id", "")),
-            ),
-            "start_date": (safe_date(row_a["start_date"]), safe_date(row_b["start_date"])),
-            "end_date": (safe_date(row_a["end_date"]), safe_date(row_b["end_date"])),
-            "date_confidence": (str(row_a["Status da data"]).upper(), str(row_b["date_confidence"]).upper()),
-            "notes": (str(row_a.get("Obs", "")).strip(), str(row_b.get("notes", "")).strip()),
-        }
+    before_df = before_df.copy()
+    after_df = after_df.copy()
+
+    # índice por ID pra comparar rápido
+    before_df["ID"] = before_df["ID"].astype(str)
+    after_df["ID"] = after_df["ID"].astype(str)
+
+    before_df = before_df.set_index("ID", drop=False)
+    after_df = after_df.set_index("ID", drop=False)
+
+    common_ids = [i for i in after_df.index if i in before_df.index]
+
+    for task_id in common_ids:
+        row_a = before_df.loc[task_id]
+        row_b = after_df.loc[task_id]
+
+        # pega valores aceitando nomes antigos/novos
+        tipo_a = str(_get(row_a, "Tipo", "Tipo Atividade", "Tipo_atividade", "tipo_atividade")).strip().upper()
+        tipo_b = str(_get(row_b, "Tipo", "Tipo Atividade", "Tipo_atividade", "tipo_atividade")).strip().upper()
+
+        status_a = str(_get(row_a, "Status", "Status da data", "Status_da_data", "status")).strip().upper()
+        status_b = str(_get(row_b, "Status", "Status da data", "Status_da_data", "status")).strip().upper()
+
+        resp_a = str(_get(row_a, "Responsável", "Responsavel", "Responsavel_nome", "assignee_name")).strip()
+        resp_b = str(_get(row_b, "Responsável", "Responsavel", "Responsavel_nome", "assignee_name")).strip()
+
+        obs_a = str(_get(row_a, "Obs", "Observações", "Observacoes", "notes")).strip()
+        obs_b = str(_get(row_b, "Obs", "Observações", "Observacoes", "notes")).strip()
+
+        titulo_a = str(_get(row_a, "Título", "Titulo", "title")).strip()
+        titulo_b = str(_get(row_b, "Título", "Titulo", "title")).strip()
+
+        # datas: aceitar variações
+        ini_a = pd.to_datetime(_get(row_a, "Início", "Inicio", "start_date"), errors="coerce")
+        ini_b = pd.to_datetime(_get(row_b, "Início", "Inicio", "start_date"), errors="coerce")
+        fim_a = pd.to_datetime(_get(row_a, "Fim", "end_date"), errors="coerce")
+        fim_b = pd.to_datetime(_get(row_b, "Fim", "end_date"), errors="coerce")
 
         payload = {}
-        for k, (newv, oldv) in fields.items():
-            if newv != oldv and newv is not None and newv != "":
-                if k in ("start_date", "end_date"):
-                    payload[k] = str(newv)
-                else:
-                    payload[k] = newv
+
+        if titulo_a != titulo_b:
+            payload["title"] = titulo_b
+
+        if tipo_a != tipo_b and tipo_b:
+            payload["tipo_atividade"] = tipo_b  # CAMPO/RELATORIO/ADMINISTRATIVO
+
+        if status_a != status_b and status_b:
+            payload["status"] = status_b  # PLANEJADO/CONFIRMADO/CANCELADO (o que estiver no constraint)
+
+        # se você salva responsável por ID, aqui você precisa mapear nome->id.
+        # Se seu editor já traz "assignee_id", priorize ele.
+        assignee_id_b = _get(row_b, "assignee_id", "Assignee ID", "Responsavel_id", default=None)
+        if assignee_id_b not in (None, "", "nan"):
+            payload["assignee_id"] = str(assignee_id_b)
+        else:
+            # se você só tem nome no editor, não inventa: mantém como está (evita quebrar)
+            # (se quiser, eu te passo o mapping people_name->people_id do seu banco)
+            pass
+
+        if obs_a != obs_b:
+            payload["notes"] = obs_b if obs_b else None
+
+        # datas
+        if pd.notna(ini_b) and (pd.isna(ini_a) or ini_a.date() != ini_b.date()):
+            payload["start_date"] = ini_b.date().isoformat()
+        if pd.notna(fim_b) and (pd.isna(fim_a) or fim_a.date() != fim_b.date()):
+            payload["end_date"] = fim_b.date().isoformat()
 
         if payload:
-            # mantém status interno válido
-            payload["status"] = DEFAULT_INTERNAL_STATUS
-            changed.append((task_id, payload))
+            sb.table("tasks").update(payload).eq("id", task_id).execute()
+            updates += 1
 
-    # Aplica
-    for task_id, payload in changed:
-        sb.table("tasks").update(payload).eq("id", task_id).execute()
+    return updates
 
-    return len(changed)
 
 
 if save_changes:
