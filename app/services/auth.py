@@ -1,6 +1,5 @@
-# app/services/auth.py
 import streamlit as st
-from app.services.supabase_client import get_anon_client
+from services.supabase_client import get_anon_client
 
 
 def is_logged_in() -> bool:

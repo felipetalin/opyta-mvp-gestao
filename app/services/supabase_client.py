@@ -1,4 +1,3 @@
-# app/services/supabase_client.py
 import os
 import streamlit as st
 from dotenv import load_dotenv
@@ -6,7 +5,6 @@ from supabase import create_client
 
 
 def _load_env():
-    # Local: carrega .env | Cloud: ignora (secrets)
     try:
         load_dotenv(override=True)
     except Exception:
@@ -14,7 +12,6 @@ def _load_env():
 
 
 def _get(key: str) -> str | None:
-    # prioridade: secrets > env
     if hasattr(st, "secrets") and key in st.secrets:
         v = st.secrets.get(key)
         return str(v) if v is not None else None
@@ -25,24 +22,19 @@ def get_anon_client():
     _load_env()
     url = _get("SUPABASE_URL")
     anon = _get("SUPABASE_ANON_KEY")
-
     if not url or not anon:
         raise RuntimeError("Faltando SUPABASE_URL / SUPABASE_ANON_KEY (.env ou Streamlit Secrets).")
-
     return create_client(url, anon)
 
 
 def get_authed_client():
-    """
-    Cliente com JWT do usuário (RLS correto).
-    Exige st.session_state['access_token'] preenchido no login.
-    """
     sb = get_anon_client()
     token = st.session_state.get("access_token")
     if not token:
         raise RuntimeError("Sem access_token na sessão. Faça login novamente.")
     sb.postgrest.auth(token)
     return sb
+
 
 
 

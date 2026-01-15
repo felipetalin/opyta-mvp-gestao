@@ -2,8 +2,8 @@
 import streamlit as st
 import pandas as pd
 
-from app.services.auth import require_login
-from app.services.supabase_client import get_authed_client
+from services.auth import require_login
+from services.supabase_client import get_authed_client
 
 st.set_page_config(page_title="Portfólio Gantt", layout="wide")
 require_login()
