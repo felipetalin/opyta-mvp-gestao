@@ -8,13 +8,26 @@ import xml.etree.ElementTree as ET
 from dotenv import load_dotenv
 from supabase import create_client
 
+
 # ===============================
 # CONFIG
 # ===============================
 NS = {"p": "http://schemas.microsoft.com/project"}
+
 STATUS_DEFAULT = "PLANEJADA"
-DATE_CONFIDENCE_DEFAULT = "FIRME"
+
+# >>> IMPORTANTE:
+# Seu banco NÃO aceita "FIRME" em date_confidence.
+# Padrão recomendado: PLANEJADO (e você muda depois no app para CONFIRMADO/CANCELADO quando aplicável)
+DATE_CONFIDENCE_DEFAULT = "PLANEJADO"
+
 PLACEHOLDER_NAME = "Gestão de Projetos"
+
+# Tipos aceitos (ajuste aqui se seu banco tiver check/enum diferente)
+ALLOWED_TIPOS = {"CAMPO", "RELATORIO", "ADMINISTRATIVO"}
+
+# Date confidence aceitos (ajuste se o seu CHECK tiver outros valores)
+ALLOWED_DATE_CONF = {"PLANEJADO", "CONFIRMADO", "CANCELADO"}
 
 
 # ===============================
@@ -40,13 +53,44 @@ def dt_to_date_str(dt):
 
 
 def normalize_tipo(group, task):
+    """
+    Regras simples:
+    - Se o grupo (summary) tiver CAMPO -> CAMPO
+    - Se tiver ADMIN -> ADMINISTRATIVO
+    - Se tiver RELAT -> RELATORIO
+    - fallback: RELATORIO
+    """
     g = (group or "").upper()
     t = (task or "").upper()
-    if "CAMPO" in g:
+
+    if "ADMIN" in g or "ADMIN" in t:
+        return "ADMINISTRATIVO"
+
+    if "CAMPO" in g or "CAMPO" in t:
         return "CAMPO"
+
     if "RELAT" in g or "RELAT" in t:
         return "RELATORIO"
+
     return "RELATORIO"
+
+
+def normalize_date_confidence(x: str | None) -> str:
+    """
+    Normaliza QUALQUER coisa para algo que o CHECK do banco aceite.
+    """
+    v = (str(x or "").strip().upper())
+
+    # valores legados / variações
+    if v in ("FIRME", "CONFIRMADA", "CONFIRMADO"):
+        return "CONFIRMADO"
+    if v in ("PLANEJADA", "PLANEJADO", "PLANEJAMENTO", "ESTIMADO", "ESTIMADA", "A DEFINIR", "A_DEFINIR"):
+        return "PLANEJADO"
+    if v in ("CANCELADA", "CANCELADO", "CANCELAMENTO"):
+        return "CANCELADO"
+
+    # default seguro
+    return DATE_CONFIDENCE_DEFAULT
 
 
 def parse_project_code_and_name(title):
@@ -55,7 +99,7 @@ def parse_project_code_and_name(title):
     if m:
         return m.group(1), m.group(2)
     parts = title.split()
-    return parts[0], title
+    return (parts[0] if parts else "SEM_CODIGO"), title
 
 
 # ===============================
@@ -118,6 +162,7 @@ def load_msproject_xml(xml_path):
             start_t = parse_iso_dt(t.findtext("p:Start", None, NS))
             end_t = parse_iso_dt(t.findtext("p:Finish", None, NS))
 
+            # grupos (summary nível 1)
             if summary == "1" and outline == "1":
                 current_group = name
                 continue
@@ -125,16 +170,26 @@ def load_msproject_xml(xml_path):
             if not uid or not name:
                 continue
 
+            # precisa de data para entrar no gantt
+            if not start_t:
+                continue
+
             res_uid = task_to_res.get(uid)
             assignee = resources.get(res_uid) if res_uid else None
 
-            tasks.append({
-                "title": name,
-                "tipo_atividade": normalize_tipo(current_group, name),
-                "start_date": dt_to_date_str(start_t),
-                "end_date": dt_to_date_str(end_t or start_t),
-                "assignee_name": assignee
-            })
+            tipo = normalize_tipo(current_group, name)
+            if tipo not in ALLOWED_TIPOS:
+                tipo = "RELATORIO"
+
+            tasks.append(
+                {
+                    "title": name,
+                    "tipo_atividade": tipo,
+                    "start_date": dt_to_date_str(start_t),
+                    "end_date": dt_to_date_str(end_t or start_t),
+                    "assignee_name": assignee,
+                }
+            )
 
     code, pname = parse_project_code_and_name(title)
 
@@ -144,7 +199,7 @@ def load_msproject_xml(xml_path):
         "start": dt_to_date_str(start),
         "end": dt_to_date_str(end),
         "tasks": tasks,
-        "people": set([t["assignee_name"] for t in tasks if t["assignee_name"]])
+        "people": set([t["assignee_name"] for t in tasks if t.get("assignee_name")]),
     }
 
 
@@ -152,40 +207,47 @@ def load_msproject_xml(xml_path):
 # DB OPS
 # ===============================
 def upsert_people(sb, names):
+    # inclui placeholder SEM duplicar
     names = sorted(set(clean(n) for n in names if clean(n)))
-    names.append(PLACEHOLDER_NAME)
+    if PLACEHOLDER_NAME not in names:
+        names.append(PLACEHOLDER_NAME)
 
     res = sb.table("people").select("id,name").execute()
-    existing = {r["name"]: r["id"] for r in (res.data or [])}
+    existing = {r["name"]: r["id"] for r in (res.data or []) if r.get("name")}
 
     inserts = []
     for n in names:
         if n not in existing:
             is_ph = (n == PLACEHOLDER_NAME)
             role = "PLACEHOLDER" if is_ph else "BIOLOGO"
-            inserts.append({
-                "name": n,
-                "role": role,
-                "activity_type": None,
-                "is_placeholder": is_ph,
-                "active": True
-            })
+            inserts.append(
+                {
+                    "name": n,
+                    "role": role,
+                    "activity_type": None,
+                    "is_placeholder": is_ph,
+                    "active": True,
+                }
+            )
 
     if inserts:
         sb.table("people").insert(inserts).execute()
 
     res2 = sb.table("people").select("id,name").execute()
-    return {r["name"]: r["id"] for r in (res2.data or [])}
+    return {r["name"]: r["id"] for r in (res2.data or []) if r.get("name")}
 
 
 def upsert_project(sb, code, name, start, end):
-    sb.table("projects").upsert({
-        "project_code": code,
-        "name": name,
-        "status": "ATIVO",
-        "start_date": start,
-        "end_date_planned": end
-    }, on_conflict="project_code").execute()
+    sb.table("projects").upsert(
+        {
+            "project_code": code,
+            "name": name,
+            "status": "ATIVO",
+            "start_date": start,
+            "end_date_planned": end,
+        },
+        on_conflict="project_code",
+    ).execute()
 
     res = sb.table("projects").select("id").eq("project_code", code).limit(1).execute()
     return res.data[0]["id"]
@@ -203,16 +265,20 @@ def import_file(sb, xml_path):
     placeholder_id = people_map[PLACEHOLDER_NAME]
 
     res = sb.table("tasks").select("title").eq("project_id", project_id).execute()
-    existing_titles = set(r["title"] for r in (res.data or []))
+    existing_titles = set(r["title"] for r in (res.data or []) if r.get("title"))
 
     inserts = []
     for t in data["tasks"]:
         if t["title"] in existing_titles:
             continue
 
-        assignee_id = people_map.get(t["assignee_name"], placeholder_id)
+        assignee_id = people_map.get(t.get("assignee_name"), placeholder_id)
 
-        inserts.append({
+        date_conf = normalize_date_confidence(DATE_CONFIDENCE_DEFAULT)
+        if date_conf not in ALLOWED_DATE_CONF:
+            date_conf = "PLANEJADO"
+
+        payload = {
             "project_id": project_id,
             "title": t["title"],
             "tipo_atividade": t["tipo_atividade"],
@@ -220,8 +286,10 @@ def import_file(sb, xml_path):
             "status": STATUS_DEFAULT,
             "start_date": t["start_date"],
             "end_date": t["end_date"],
-            "date_confidence": DATE_CONFIDENCE_DEFAULT
-        })
+            "date_confidence": date_conf,
+        }
+
+        inserts.append(payload)
 
     if inserts:
         sb.table("tasks").insert(inserts).execute()
