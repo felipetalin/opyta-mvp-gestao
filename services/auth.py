@@ -1,33 +1,48 @@
 # services/auth.py
 import streamlit as st
-from services.supabase_client import get_public_client
+from services.supabase_client import get_anon_client
 
 
-def login(email: str, password: str):
-    sb = get_public_client()
+SESSION_TOKEN_KEY = "sb_access_token"
+SESSION_EMAIL_KEY = "user_email"
 
-    # supabase-py v2
-    res = sb.auth.sign_in_with_password({"email": email, "password": password})
 
-    session = res.session
-    user = res.user
+def is_logged_in() -> bool:
+    return bool(st.session_state.get(SESSION_TOKEN_KEY))
 
-    if not session or not session.access_token:
-        raise RuntimeError("Login falhou: sessão inválida retornada pelo Supabase.")
 
-    st.session_state["user"] = {"id": user.id, "email": user.email}
-    st.session_state["access_token"] = session.access_token
-    st.session_state["refresh_token"] = session.refresh_token
-    st.session_state["logged_in"] = True
+def login():
+    st.subheader("Login")
+
+    email = st.text_input("Email", key="login_email")
+    password = st.text_input("Senha", type="password", key="login_password")
+
+    if st.button("Entrar"):
+        try:
+            sb = get_anon_client()
+            res = sb.auth.sign_in_with_password({"email": email, "password": password})
+            token = res.session.access_token if res and res.session else None
+            if not token:
+                st.error("Falha no login: token não retornou.")
+                return
+
+            st.session_state[SESSION_TOKEN_KEY] = token
+            st.session_state[SESSION_EMAIL_KEY] = email
+            st.success(f"Logado como: {email}")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Falha no login: {e}")
 
 
 def logout():
-    try:
-        sb = get_public_client()
-        sb.auth.sign_out()
-    except Exception:
-        pass
-
-    for k in ["user", "access_token", "refresh_token", "logged_in"]:
+    for k in [SESSION_TOKEN_KEY, SESSION_EMAIL_KEY]:
         if k in st.session_state:
             del st.session_state[k]
+    st.rerun()
+
+
+def require_login():
+    if not is_logged_in():
+        login()
+        st.stop()
+

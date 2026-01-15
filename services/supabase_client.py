@@ -1,66 +1,48 @@
 # services/supabase_client.py
 import os
 import streamlit as st
-from dotenv import load_dotenv
-from supabase import create_client
+from supabase import create_client, Client
 
 
-def _load_env():
-    # Local: lê .env; Cloud: usa Secrets/vars do Streamlit
-    load_dotenv(override=True)
+def _get_setting(key: str, default: str | None = None) -> str | None:
+    # Prioridade: Streamlit Secrets > env
+    if hasattr(st, "secrets") and key in st.secrets:
+        val = st.secrets.get(key)
+        return str(val) if val is not None else default
+    return os.environ.get(key, default)
 
 
-def get_public_client():
+@st.cache_resource(show_spinner=False)
+def get_anon_client() -> Client:
+    url = _get_setting("SUPABASE_URL")
+    anon = _get_setting("SUPABASE_ANON_KEY")
+    if not url or not anon:
+        raise RuntimeError("Faltando SUPABASE_URL / SUPABASE_ANON_KEY (env ou Streamlit Secrets).")
+    return create_client(url, anon)
+
+
+@st.cache_resource(show_spinner=False)
+def get_service_client() -> Client | None:
     """
-    Cliente ANÔNIMO (sem usuário logado).
-    Serve para coisas públicas (se houver), mas NÃO para telas com RLS por usuário.
+    Se SUPABASE_SERVICE_ROLE_KEY existir (Streamlit Secrets recomendado),
+    retorna um client com permissão total (ignora RLS).
     """
-    _load_env()
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_ANON_KEY")
-
-    if not url or not key:
-        raise RuntimeError("Faltam SUPABASE_URL / SUPABASE_ANON_KEY no ambiente (.env ou Secrets).")
-
-    return create_client(url, key)
+    url = _get_setting("SUPABASE_URL")
+    service = _get_setting("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not service:
+        return None
+    return create_client(url, service)
 
 
-def get_authed_client():
+def get_authed_client(access_token: str | None) -> Client:
     """
-    Cliente autenticado com o usuário logado (RLS funcionando).
-    Requer st.session_state['access_token'] preenchido no login.
+    Client que usa o access_token do usuário (RLS).
     """
-    sb = get_public_client()
-
-    access_token = st.session_state.get("access_token")
-    if not access_token:
-        # Não derruba o app — mas você vai enxergar 0 linhas em tabelas com RLS.
-        raise RuntimeError("Sessão sem access_token. Faça login novamente.")
-
-    # PostgREST com JWT do usuário (RLS OK)
-    sb.postgrest.auth(access_token)
-
-    # (Opcional) storage/realtime também, se usar
-    try:
-        sb.storage.auth(access_token)
-    except Exception:
-        pass
-
+    sb = get_anon_client()
+    if access_token:
+        # Injeta o JWT no header Authorization
+        sb.postgrest.auth(access_token)
     return sb
 
-
-def get_service_client():
-    """
-    Cliente ADMIN (bypass RLS) - use só em scripts de import/migração.
-    Precisa SUPABASE_SERVICE_ROLE_KEY no .env (NUNCA no Streamlit Cloud público).
-    """
-    _load_env()
-    url = os.getenv("SUPABASE_URL")
-    service_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-
-    if not url or not service_key:
-        raise RuntimeError("Faltam SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY para client ADMIN.")
-
-    return create_client(url, service_key)
 
 
