@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from services.supabase_client import get_authed_client
 
+
 sb = get_authed_client()
 if not sb:
     st.warning("Faça login para acessar.")
