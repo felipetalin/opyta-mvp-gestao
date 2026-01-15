@@ -67,7 +67,15 @@ with st.container(border=True):
         last_day = date(today.year, 12, 31)
     else:
         last_day = date(today.year, today.month + 1, 1) - pd.Timedelta(days=1)
-        last_day = last_day.date()
+        
+
+from datetime import datetime, date
+
+# Se for datetime → pode usar .date()
+if isinstance(last_day, datetime):
+    last_day = last_day.date()
+
+# Se já for date → NÃO faz nada
 
     with c1:
         start_filter = st.date_input("De", value=first_day)
