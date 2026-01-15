@@ -3,7 +3,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from datetime import date
+from datetime import date, timedelta
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
@@ -46,13 +46,12 @@ if df.empty:
 today = date.today()
 first_day = date(today.year, today.month, 1)
 
-# último dia do mês atual (sem gambiarra)
+# último dia do mês atual (padrão seguro)
 if today.month == 12:
-    last_day = date(today.year, 12, 31)
+    next_month_first = date(today.year + 1, 1, 1)
 else:
     next_month_first = date(today.year, today.month + 1, 1)
-    last_day = next_month_first - pd.Timedelta(days=1)
-    last_day = last_day.to_pydatetime().date()  # garante date
+last_day = next_month_first - timedelta(days=1)
 
 project_options = ["(Todos)"] + sorted(df["project_code"].dropna().unique().tolist()) if "project_code" in df.columns else ["(Todos)"]
 assignee_options = ["(Todos)"] + sorted(df["assignee_name"].dropna().unique().tolist()) if "assignee_name" in df.columns else ["(Todos)"]
@@ -150,10 +149,3 @@ st.plotly_chart(fig, use_container_width=True)
 
 with st.expander("Dados (opcional)"):
     st.dataframe(df_f, use_container_width=True, hide_index=True)
-
-
-
-
-
-
-
