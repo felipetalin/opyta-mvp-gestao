@@ -1,142 +1,95 @@
-# --- PATH BOOTSTRAP (Streamlit Cloud) ---
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]  # raiz do repo
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
-# ----------------------------------------
-
-
-
-import os, sys
+# app/pages/2_Projetos.py
 import streamlit as st
 import pandas as pd
-from dotenv import load_dotenv
+from datetime import date
 
-sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-from services.auth import require_login, inject_session  # noqa: E402
+from app.services.auth import require_login
+from app.services.supabase_client import get_authed_client
 
-load_dotenv()
 st.set_page_config(page_title="Projetos", layout="wide")
+require_login()
+sb = get_authed_client()
+
 st.title("Projetos")
 
-require_login()
-sb = inject_session()
-
-@st.cache_data(ttl=30)
-def load_people():
-    res = sb.table("people").select("id,name,active,is_placeholder,role").order("name").execute()
-    df = pd.DataFrame(res.data or [])
-    if not df.empty and "active" in df.columns:
-        df = df[df["active"] == True]  # noqa: E712
-    return df
-
-@st.cache_data(ttl=30)
-def load_projects():
-    res = sb.table("projects").select("*").order("project_code").execute()
+@st.cache_data(ttl=20)
+def fetch_projects():
+    res = sb.table("projects").select(
+        "id,project_code,name,client,status,start_date,end_date_planned,notes,created_at"
+    ).order("created_at", desc=True).execute()
     return pd.DataFrame(res.data or [])
 
-people_df = load_people()
-projects_df = load_projects()
+def upsert_project(project_id, payload):
+    if project_id:
+        return sb.table("projects").update(payload).eq("id", project_id).execute()
+    return sb.table("projects").insert(payload).execute()
 
-# -------------------- Editor (Create / Edit) FIRST --------------------
+df = fetch_projects()
+
 st.subheader("Criar / Editar")
 
-edit_mode = st.checkbox("Editar projeto existente", value=False)
+mode = st.radio("Modo", ["Criar", "Editar"], horizontal=True)
 
-selected_row = None
-if edit_mode and not projects_df.empty:
-    options = (projects_df["project_code"].astype(str) + " | " + projects_df["name"].astype(str)).tolist()
-    pick = st.selectbox("Selecione um projeto", options)
-    code = pick.split("|")[0].strip()
-    selected_row = projects_df[projects_df["project_code"] == code].iloc[0].to_dict()
+edit_row = None
+if mode == "Editar":
+    if df.empty:
+        st.info("Sem projetos para editar.")
+    else:
+        options = (df["project_code"].fillna("") + " — " + df["name"].fillna("")).tolist()
+        chosen = st.selectbox("Escolha um projeto", options)
+        idx = options.index(chosen)
+        edit_row = df.iloc[idx].to_dict()
 
-defv = lambda k, d=None: (selected_row.get(k) if selected_row else d)
+c1, c2, c3 = st.columns(3)
+with c1:
+    project_code = st.text_input("Código", value=(edit_row.get("project_code") if edit_row else ""))
+with c2:
+    name = st.text_input("Nome", value=(edit_row.get("name") if edit_row else ""))
+with c3:
+    client = st.text_input("Cliente", value=(edit_row.get("client") if edit_row else ""))
 
-pm_options = ["(vazio)"]
-pm_map = {}
-if not people_df.empty:
-    for _, r in people_df.iterrows():
-        label = r["name"]
-        pm_options.append(label)
-        pm_map[label] = r["id"]
+c4, c5, c6 = st.columns(3)
+with c4:
+    status = st.selectbox("Status", ["ATIVO", "PAUSADO", "CONCLUIDO"], index=0)
+    if edit_row and edit_row.get("status") in ["ATIVO", "PAUSADO", "CONCLUIDO"]:
+        status = edit_row.get("status")
+with c5:
+    start_date = st.date_input("Início", value=(pd.to_datetime(edit_row["start_date"]).date() if edit_row and edit_row.get("start_date") else date.today()))
+with c6:
+    end_date_planned = st.date_input("Fim previsto", value=(pd.to_datetime(edit_row["end_date_planned"]).date() if edit_row and edit_row.get("end_date_planned") else date.today()))
 
-pm_default_idx = 0
-current_pm_id = defv("project_manager_id", None)
-if current_pm_id and pm_map:
-    for i, label in enumerate(pm_options):
-        if label != "(vazio)" and str(pm_map[label]) == str(current_pm_id):
-            pm_default_idx = i
-            break
+notes = st.text_area("Observações", value=(edit_row.get("notes") if edit_row else ""))
 
-with st.form("proj_form", clear_on_submit=not edit_mode):
-    c1, c2, c3 = st.columns([1.2, 2.6, 2.0])
-    with c1:
-        project_code = st.text_input("Código (project_code)", value=defv("project_code",""), placeholder="BRSAJT02")
-    with c2:
-        name = st.text_input("Nome do Projeto", value=defv("name",""), placeholder="Monitoramento da Ictiofauna")
-    with c3:
-        client = st.text_input("Cliente", value=defv("client",""), placeholder="Cliente X")
-
-    c4, c5, c6, c7 = st.columns([1.2, 1.2, 1.2, 1.8])
-    with c4:
-        status = st.selectbox("Status", ["ATIVO","PAUSADO","CONCLUIDO"],
-                              index=["ATIVO","PAUSADO","CONCLUIDO"].index(defv("status","ATIVO")))
-    with c5:
-        start_date = st.date_input("Início", value=pd.to_datetime(defv("start_date", None)) if defv("start_date", None) else None, format="DD/MM/YYYY")
-    with c6:
-        end_date_planned = st.date_input("Fim previsto", value=pd.to_datetime(defv("end_date_planned", None)) if defv("end_date_planned", None) else None, format="DD/MM/YYYY")
-    with c7:
-        pm_label = st.selectbox("Gerente do Projeto", pm_options, index=pm_default_idx)
-
-    notes = st.text_area("Observações", value=defv("notes","") or "", height=90)
-    submitted = st.form_submit_button("Salvar")
-
-if submitted:
-    project_code = (project_code or "").strip()
-    name = (name or "").strip()
-    if not project_code or not name:
-        st.error("Código e nome são obrigatórios.")
-        st.stop()
-
-    pm_id = None if pm_label == "(vazio)" else pm_map.get(pm_label)
-
+if st.button("Salvar projeto", type="primary"):
     payload = {
-        "project_code": project_code,
-        "name": name,
-        "client": (client or "").strip() or None,
+        "project_code": project_code.strip() or None,
+        "name": name.strip() or None,
+        "client": client.strip() or None,
         "status": status,
-        "start_date": str(start_date) if start_date else None,
-        "end_date_planned": str(end_date_planned) if end_date_planned else None,
-        "project_manager_id": str(pm_id) if pm_id else None,
-        "notes": (notes or "").strip() or None,
+        "start_date": start_date.isoformat(),
+        "end_date_planned": end_date_planned.isoformat(),
+        "notes": notes.strip() or None,
     }
+    project_id = edit_row.get("id") if edit_row else None
 
-    sb.table("projects").upsert(payload, on_conflict="project_code").execute()
-    st.success("Projeto salvo.")
-    st.cache_data.clear()
-    st.rerun()
-
-# delete opcional
-if edit_mode and selected_row is not None:
-    with st.expander("Excluir projeto (cuidado)"):
-        st.warning("Excluir remove o projeto e tarefas relacionadas (FK).")
-        if st.button("Excluir este projeto"):
-            sb.table("projects").delete().eq("project_code", selected_row["project_code"]).execute()
-            st.success("Projeto excluído.")
-            st.cache_data.clear()
-            st.rerun()
+    try:
+        upsert_project(project_id, payload)
+        st.success("Projeto salvo.")
+        st.cache_data.clear()
+        st.rerun()
+    except Exception as e:
+        st.error(f"Erro ao salvar projeto: {e}")
 
 st.divider()
+st.subheader("Lista de Projetos")
 
-# -------------------- List AFTER --------------------
-st.subheader("Lista de projetos")
-projects_df = load_projects()
-
-if projects_df.empty:
-    st.info("Sem projetos ainda.")
+df = fetch_projects()
+if df.empty:
+    st.info("Nenhum projeto cadastrado.")
 else:
-    show_cols = ["project_code","name","client","status","start_date","end_date_planned","notes","updated_at"]
-    cols = [c for c in show_cols if c in projects_df.columns]
-    st.dataframe(projects_df[cols], use_container_width=True, hide_index=True)
+    st.dataframe(
+        df[["project_code", "name", "client", "status", "start_date", "end_date_planned"]],
+        use_container_width=True,
+        hide_index=True
+    )
+
