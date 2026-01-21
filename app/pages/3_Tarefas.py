@@ -1,355 +1,310 @@
 # app/pages/3_Tarefas.py
 
-import streamlit as st
-import pandas as pd
 from datetime import date
+
+import pandas as pd
+import streamlit as st
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
 
 st.set_page_config(page_title="Tarefas", layout="wide")
-st.title("Tarefas")
 
 require_login()
 sb = get_authed_client()
 
-# -----------------------------
-# Config (valores aceitos pelos CHECKs)
-# -----------------------------
-DATE_CONF_OPTIONS = ["PLANEJADO", "CONFIRMADO", "CANCELADO"]  # tasks_date_confidence_check
-STATUS_OPTIONS = ["PLANEJADA", "EM_ANDAMENTO", "CONCLUIDA", "CANCELADA"]  # tasks_status_check
-# Se você quiser deixar simples no formulário, a gente usa STATUS="PLANEJADA" sempre,
-# e o usuário controla "Status da data" (date_confidence) como você decidiu.
-
-# Tabela de vínculo (ajuste aqui se o nome for outro)
-TASK_PEOPLE_TABLE = "task_people"  # troque para "task_assignees" se for esse o nome
-TASK_PEOPLE_PERSON_COL = "person_id"  # se sua coluna chamar "person_id" ok; se chamar "person_id" ok; se chamar "person_id" mantenha
-TASK_PEOPLE_IS_LEAD_COL = "is_lead"
+st.title("Tarefas")
 
 # -----------------------------
-# Helpers
+# Data loaders
 # -----------------------------
 @st.cache_data(ttl=30)
 def load_projects():
-    res = sb.table("projects").select("id, project_code, name").order("project_code").execute()
-    df = pd.DataFrame(res.data or [])
+    r = (
+        sb.table("projects")
+        .select("id, project_code, name")
+        .order("project_code")
+        .execute()
+    )
+    df = pd.DataFrame(r.data or [])
     if df.empty:
         return df
-    df["label"] = df["project_code"].fillna("") + " — " + df["name"].fillna("")
+    df["label"] = df["project_code"].astype(str) + " | " + df["name"].astype(str)
     return df
+
 
 @st.cache_data(ttl=30)
-def load_people_active():
-    # ajuste o select conforme sua tabela people
-    res = sb.table("people").select("id, name, active").execute()
-    df = pd.DataFrame(res.data or [])
-    if df.empty:
-        return df
-    df = df[df["active"] == True].copy() if "active" in df.columns else df
-    df["name"] = df["name"].astype(str)
-    return df.sort_values("name")
+def load_people():
+    r = sb.table("people").select("id, name").order("name").execute()
+    return pd.DataFrame(r.data or [])
 
-@st.cache_data(ttl=15)
+
+@st.cache_data(ttl=30)
 def load_tasks_for_project(project_id: str):
-    # puxa tasks
-    t = sb.table("tasks").select("id, project_id, title, tipo_atividade, start_date, end_date, date_confidence, obs").eq("project_id", project_id).order("start_date").execute()
-    df = pd.DataFrame(t.data or [])
+    # ✅ FIX AQUI: tasks não tem "obs", tem "notes"
+    # (mantemos "notes" e mais pra baixo exibimos como "Obs" na UI)
+    r = (
+        sb.table("tasks")
+        .select("id, project_id, title, tipo_atividade, status, date_confidence, start_date, end_date, notes")
+        .eq("project_id", project_id)
+        .order("start_date")
+        .execute()
+    )
+    return pd.DataFrame(r.data or [])
+
+
+@st.cache_data(ttl=30)
+def load_task_people(project_id: str):
+    # task_people: task_id, person_id, is_lead
+    r = (
+        sb.table("task_people")
+        .select("task_id, person_id, is_lead")
+        .execute()
+    )
+    df = pd.DataFrame(r.data or [])
     if df.empty:
         return df
+    # filtramos só tasks do projeto depois, porque o PostgREST não faz join aqui
+    tasks = load_tasks_for_project(project_id)
+    if tasks.empty:
+        return df.iloc[0:0]
+    return df[df["task_id"].isin(tasks["id"].tolist())].copy()
 
-    # puxa vínculos
-    rel = sb.table(TASK_PEOPLE_TABLE).select("task_id, person_id, is_lead").execute()
-    rel_df = pd.DataFrame(rel.data or [])
-    if rel_df.empty:
-        df["Responsáveis"] = ""
-        df["Lead"] = ""
-        return df
 
-    people = load_people_active()
-    if people.empty:
-        df["Responsáveis"] = ""
-        df["Lead"] = ""
-        return df
+def invalidate_all():
+    load_projects.clear()
+    load_people.clear()
+    load_tasks_for_project.clear()
+    load_task_people.clear()
 
-    rel_df = rel_df.merge(people[["id", "name"]], left_on="person_id", right_on="id", how="left")
-    rel_df["name"] = rel_df["name"].fillna("")
-
-    # monta strings por task
-    agg = (
-        rel_df.groupby("task_id")
-        .apply(lambda g: pd.Series({
-            "Responsáveis": " + ".join(
-                g.sort_values(["is_lead", "name"], ascending=[False, True])["name"].astype(str).tolist()
-            ),
-            "Lead": (g[g["is_lead"] == True]["name"].astype(str).iloc[0] if (g["is_lead"] == True).any() else "")
-        }))
-        .reset_index()
-        .rename(columns={"task_id": "id"})
-    )
-
-    df = df.merge(agg, on="id", how="left")
-    df["Responsáveis"] = df["Responsáveis"].fillna("")
-    df["Lead"] = df["Lead"].fillna("")
-    return df
-
-def insert_task_people(task_id: str, person_ids: list[str], lead_id: str):
-    rows = []
-    for pid in person_ids:
-        rows.append({
-            "task_id": task_id,
-            "person_id": pid,
-            "is_lead": (pid == lead_id),
-        })
-    if rows:
-        sb.table(TASK_PEOPLE_TABLE).insert(rows).execute()
-
-def replace_task_people(task_id: str, person_ids: list[str], lead_id: str):
-    # apaga vínculos e recria
-    sb.table(TASK_PEOPLE_TABLE).delete().eq("task_id", task_id).execute()
-    insert_task_people(task_id, person_ids, lead_id)
-
-def delete_task(task_id: str):
-    # apaga vínculos primeiro (FK)
-    sb.table(TASK_PEOPLE_TABLE).delete().eq("task_id", task_id).execute()
-    sb.table("tasks").delete().eq("id", task_id).execute()
-
-def cancel_task(task_id: str):
-    sb.table("tasks").update({"status": "CANCELADA"}).eq("id", task_id).execute()
 
 # -----------------------------
-# UI - Projeto
+# UI: selecionar projeto
 # -----------------------------
-projects = load_projects()
-if projects.empty:
-    st.warning("Nenhum projeto cadastrado ainda.")
+df_projects = load_projects()
+if df_projects.empty:
+    st.warning("Nenhum projeto cadastrado.")
     st.stop()
 
-proj_label_to_id = dict(zip(projects["label"], projects["id"]))
-sel_proj_label = st.selectbox("Projeto", projects["label"].tolist(), index=0)
-project_id = proj_label_to_id[sel_proj_label]
+sel = st.selectbox("Projeto", df_projects["label"].tolist(), index=0)
+project_id = df_projects.loc[df_projects["label"] == sel, "id"].iloc[0]
 
-people_df = load_people_active()
-if people_df.empty:
-    st.warning("Tabela PEOPLE vazia/sem ativos. Cadastre pessoas primeiro.")
-    st.stop()
-
-name_to_id = dict(zip(people_df["name"], people_df["id"]))
-all_names = people_df["name"].tolist()
-
-st.divider()
-
-# -----------------------------
-# Nova tarefa
-# -----------------------------
-with st.container(border=True):
-    st.subheader("Nova tarefa")
-
-    c1, c2, c3, c4 = st.columns([2.2, 1.2, 1.4, 1.2])
-
-    with c1:
-        title = st.text_input("Título", value="", placeholder="Ex.: Campanha 03 - Jan/26")
-
-    with c2:
-        tipo = st.selectbox("Tipo Atividade", ["CAMPO", "RELATORIO", "ADMINISTRATIVO"], index=0)
-
-    with c3:
-        # multiselect de responsáveis (SEM placeholder)
-        sel_people = st.multiselect("Responsáveis", all_names, default=[])
-
-    with c4:
-        date_conf = st.selectbox("Status da data", DATE_CONF_OPTIONS, index=0)
-
-    c5, c6 = st.columns([1, 1])
-
-    with c5:
-        start = st.date_input("Início", value=date.today(), format="DD/MM/YYYY")
-
-    with c6:
-        end = st.date_input("Fim", value=date.today(), format="DD/MM/YYYY")
-
-    obs = st.text_area("Obs", value="", height=80)
-
-    # Lead obrigatório (somente aparece quando tem selecionados)
-    lead_name = None
-    if sel_people:
-        lead_name = st.selectbox("Lead (obrigatório)", sel_people, index=0)
-    else:
-        st.info("Selecione pelo menos 1 responsável para habilitar o Lead.")
-
-    if st.button("Salvar tarefa", type="primary"):
-        if not title.strip():
-            st.error("Título é obrigatório.")
-            st.stop()
-
-        if not sel_people:
-            st.error("Selecione pelo menos 1 responsável.")
-            st.stop()
-
-        if not lead_name:
-            st.error("Selecione o Lead.")
-            st.stop()
-
-        if end < start:
-            st.error("Fim não pode ser antes do Início.")
-            st.stop()
-
-        payload = {
-            "project_id": project_id,
-            "title": title.strip(),
-            "tipo_atividade": tipo,
-            "status": "PLANEJADA",         # mantém simples aqui
-            "date_confidence": date_conf,  # sua decisão de manter só “status da data”
-            "start_date": start.isoformat(),
-            "end_date": end.isoformat(),
-            "obs": obs.strip() if obs else None,
-        }
-
-        ins = sb.table("tasks").insert(payload).execute()
-        new_id = (ins.data or [{}])[0].get("id")
-
-        if not new_id:
-            st.error("Falha ao criar task (não retornou ID).")
-            st.stop()
-
-        person_ids = [name_to_id[n] for n in sel_people]
-        lead_id = name_to_id[lead_name]
-
-        replace_task_people(task_id=new_id, person_ids=person_ids, lead_id=lead_id)
-
-        st.success("Tarefa criada com responsáveis e lead.")
-        st.cache_data.clear()
-        st.rerun()
-
-st.divider()
-
-# -----------------------------
-# Lista (edição inline)
-# -----------------------------
-st.subheader("Lista de tarefas (edição inline)")
+df_people = load_people()
+people_map = {row["name"]: row["id"] for _, row in df_people.iterrows()}
+people_names = sorted(list(people_map.keys()))
 
 df_tasks = load_tasks_for_project(project_id)
-
 if df_tasks.empty:
-    st.info("Sem tarefas nesse projeto.")
-else:
-    # Renomeia colunas pra UI
-    view = df_tasks.copy()
+    st.info("Este projeto ainda não tem tarefas.")
+    st.stop()
 
-    # organiza ordem: Obs -> ID no fim (como você pediu)
-    ui_cols = []
-    col_map = {
+df_tp = load_task_people(project_id)
+
+# -----------------------------
+# Montar dataframe editável
+# -----------------------------
+# assignees por tarefa (lista de nomes)
+task_assignees = {}
+task_lead = {}
+
+if not df_tp.empty and not df_people.empty:
+    inv_people = {row["id"]: row["name"] for _, row in df_people.iterrows()}
+
+    for tid, grp in df_tp.groupby("task_id"):
+        names = []
+        lead_name = None
+        for _, r in grp.iterrows():
+            nm = inv_people.get(r["person_id"])
+            if nm:
+                names.append(nm)
+                if bool(r.get("is_lead")):
+                    lead_name = nm
+        task_assignees[tid] = sorted(set(names))
+        task_lead[tid] = lead_name
+
+# defaults
+def safe_list(x):
+    return x if isinstance(x, list) else []
+
+df_edit = df_tasks.copy()
+df_edit["Profissionais"] = df_edit["id"].map(lambda x: safe_list(task_assignees.get(x, [])))
+df_edit["Lead"] = df_edit["id"].map(lambda x: task_lead.get(x, None))
+df_edit["Obs"] = df_edit.get("notes", "")
+
+# colunas (pedido seu: ID depois de Obs)
+df_show = df_edit[
+    [
+        "title",
+        "tipo_atividade",
+        "date_confidence",
+        "status",
+        "start_date",
+        "end_date",
+        "Profissionais",
+        "Lead",
+        "Obs",
+        "id",
+    ]
+].rename(
+    columns={
         "title": "Tarefa",
         "tipo_atividade": "Tipo",
-        "Responsáveis": "Responsáveis",
-        "Lead": "Lead",
+        "date_confidence": "Status da data",
+        "status": "Status",
         "start_date": "Início",
         "end_date": "Fim",
-        "date_confidence": "Status da data",
-        "obs": "Obs",
         "id": "ID",
     }
-    for k in ["title", "tipo_atividade", "Responsáveis", "Lead", "start_date", "end_date", "date_confidence", "obs", "id"]:
-        if k in view.columns:
-            ui_cols.append(k)
-
-    view = view[ui_cols].rename(columns=col_map)
-
-    # editáveis: Tarefa/Tipo/Inicio/Fim/Status da data/Obs
-    # Responsáveis/Lead a gente não edita inline aqui (porque precisa regravar task_people com lead obrigatório)
-    disabled_cols = ["Responsáveis", "Lead", "ID"]
-
-    edited = st.data_editor(
-        view,
-        use_container_width=True,
-        hide_index=True,
-        disabled=disabled_cols,
-        key="tasks_editor",
-    )
-
-    cbtn1, cbtn2 = st.columns([1, 1])
-    with cbtn1:
-        if st.button("Salvar alterações", type="primary"):
-            before = view.copy()
-            after = edited.copy()
-
-            # detecta mudanças linha a linha
-            changes = []
-            for i in range(len(after)):
-                row_a = before.iloc[i]
-                row_b = after.iloc[i]
-                task_id = str(row_b["ID"])
-
-                upd = {}
-                # Tarefa
-                if str(row_a["Tarefa"]) != str(row_b["Tarefa"]):
-                    upd["title"] = str(row_b["Tarefa"]).strip()
-
-                # Tipo
-                if str(row_a["Tipo"]) != str(row_b["Tipo"]):
-                    upd["tipo_atividade"] = str(row_b["Tipo"]).strip()
-
-                # Datas
-                if str(row_a["Início"]) != str(row_b["Início"]):
-                    upd["start_date"] = str(row_b["Início"])
-
-                if str(row_a["Fim"]) != str(row_b["Fim"]):
-                    upd["end_date"] = str(row_b["Fim"])
-
-                # Status da data
-                if str(row_a["Status da data"]) != str(row_b["Status da data"]):
-                    upd["date_confidence"] = str(row_b["Status da data"]).strip()
-
-                # Obs
-                if str(row_a.get("Obs", "")) != str(row_b.get("Obs", "")):
-                    upd["obs"] = (str(row_b.get("Obs", "")).strip() or None)
-
-                if upd:
-                    changes.append((task_id, upd))
-
-            # aplica
-            for task_id, upd in changes:
-                sb.table("tasks").update(upd).eq("id", task_id).execute()
-
-            st.success(f"Alterações salvas: {len(changes)} tarefa(s).")
-            st.cache_data.clear()
-            st.rerun()
-
-    with cbtn2:
-        if st.button("Recarregar"):
-            st.cache_data.clear()
-            st.rerun()
-
-st.divider()
+)
 
 # -----------------------------
-# Ações: Cancelar / Excluir
+# Editor
 # -----------------------------
-st.subheader("Ações (Cancelar / Excluir)")
+st.caption("Edite inline e clique em **Salvar alterações** ao final.")
 
-df_tasks2 = load_tasks_for_project(project_id)
-if df_tasks2.empty:
-    st.info("Sem tarefas para ações.")
-else:
-    # monta label com ID
-    df_tasks2["label"] = df_tasks2["title"].astype(str) + " — " + df_tasks2["id"].astype(str)
-    pick = st.selectbox("Selecione uma tarefa", df_tasks2["label"].tolist(), index=0)
-    picked_id = pick.split(" — ")[-1].strip()
+col_config = {
+    "Tarefa": st.column_config.TextColumn(width="large"),
+    "Tipo": st.column_config.SelectboxColumn(
+        options=["CAMPO", "RELATORIO", "ADMINISTRATIVO"],
+        required=True,
+        width="small",
+    ),
+    "Status da data": st.column_config.SelectboxColumn(
+        options=["PLANEJADO", "CONFIRMADO", "CANCELADO"],
+        required=False,
+        width="small",
+    ),
+    "Status": st.column_config.SelectboxColumn(
+        options=["PLANEJADA", "AGUARDANDO_CONFIRMACAO", "EM_ANDAMENTO", "CONCLUIDA", "CANCELADA"],
+        required=True,
+        width="small",
+    ),
+    "Início": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+    "Fim": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+    "Profissionais": st.column_config.ListColumn(help="Selecione 1+ pessoas", width="large"),
+    "Lead": st.column_config.SelectboxColumn(options=people_names, required=True, width="medium"),
+    "Obs": st.column_config.TextColumn(width="large"),
+    "ID": st.column_config.TextColumn(disabled=True, width="medium"),
+}
 
-    c1, c2 = st.columns([1, 2])
+edited = st.data_editor(
+    df_show,
+    use_container_width=True,
+    hide_index=True,
+    column_config=col_config,
+    num_rows="fixed",
+)
 
-    with c1:
-        if st.button("Cancelar tarefa"):
-            cancel_task(picked_id)
-            st.success("Tarefa cancelada (status=CANCELADA).")
-            st.cache_data.clear()
-            st.rerun()
+# -----------------------------
+# Validar e salvar
+# -----------------------------
+def normalize_str(x):
+    if x is None:
+        return None
+    s = str(x).strip()
+    return s if s else None
 
-    with c2:
-        confirm = st.checkbox("Confirmo exclusão definitiva desta tarefa")
-        if st.button("Excluir tarefa", type="secondary", disabled=not confirm):
-            delete_task(picked_id)
-            st.success("Tarefa excluída.")
-            st.cache_data.clear()
-            st.rerun()
+
+def to_date(x):
+    if x is None or x == "":
+        return None
+    return pd.to_datetime(x).date()
+
+
+def save_changes(before_df: pd.DataFrame, after_df: pd.DataFrame) -> int:
+    # merge por ID
+    b = before_df.copy()
+    a = after_df.copy()
+
+    # garantir colunas
+    for c in ["ID", "Tarefa", "Tipo", "Status da data", "Status", "Início", "Fim", "Profissionais", "Lead", "Obs"]:
+        if c not in a.columns:
+            raise KeyError(f"Coluna esperada ausente no editor: {c}")
+
+    b = b.set_index("ID")
+    a = a.set_index("ID")
+
+    updated = 0
+
+    for tid in a.index:
+        row_a = a.loc[tid]
+        row_b = b.loc[tid]
+
+        # valida lead obrigatório
+        lead = normalize_str(row_a["Lead"])
+        profs = row_a["Profissionais"] if isinstance(row_a["Profissionais"], list) else []
+        profs = [normalize_str(p) for p in profs if normalize_str(p)]
+        profs = sorted(set(profs))
+
+        if not lead:
+            st.error(f"Tarefa {tid}: Lead é obrigatório.")
+            return 0
+        if lead not in profs:
+            # garante lead dentro da lista
+            profs = sorted(set(profs + [lead]))
+
+        # datas
+        d_ini = to_date(row_a["Início"])
+        d_fim = to_date(row_a["Fim"])
+        if d_ini and d_fim and d_fim < d_ini:
+            st.error(f"Tarefa '{row_a['Tarefa']}': Fim < Início.")
+            return 0
+
+        payload_tasks = {
+            "title": normalize_str(row_a["Tarefa"]),
+            "tipo_atividade": normalize_str(row_a["Tipo"]),
+            "date_confidence": normalize_str(row_a["Status da data"]),
+            "status": normalize_str(row_a["Status"]),
+            "start_date": d_ini.isoformat() if d_ini else None,
+            "end_date": d_fim.isoformat() if d_fim else None,
+            "notes": normalize_str(row_a["Obs"]),
+        }
+
+        # detecta mudança em tasks
+        changed_tasks = False
+        for k in ["title", "tipo_atividade", "date_confidence", "status", "start_date", "end_date", "notes"]:
+            # compara com before (que tem nomes diferentes)
+            pass
+
+        # atualiza tasks sempre (mais simples e seguro)
+        sb.table("tasks").update(payload_tasks).eq("id", tid).execute()
+
+        # atualizar task_people: remove tudo e insere novamente (simples e robusto)
+        sb.table("task_people").delete().eq("task_id", tid).execute()
+
+        inserts_tp = []
+        for name in profs:
+            pid = people_map.get(name)
+            if not pid:
+                st.error(f"Pessoa não encontrada na tabela people: {name}")
+                return 0
+            inserts_tp.append({"task_id": tid, "person_id": pid, "is_lead": (name == lead)})
+
+        if inserts_tp:
+            sb.table("task_people").insert(inserts_tp).execute()
+
+        updated += 1
+
+    return updated
+
+
+# df_before para comparação/validação (do jeito que mostramos)
+before = df_show.copy()
+
+# botão salvar
+c1, c2 = st.columns([1, 3])
+with c1:
+    if st.button("💾 Salvar alterações", type="primary"):
+        try:
+            n = save_changes(before_df=before, after_df=edited)
+            if n > 0:
+                st.success(f"Salvo! {n} tarefas atualizadas.")
+                invalidate_all()
+                st.rerun()
+        except Exception as e:
+            st.error(f"Erro ao salvar: {e}")
+
+with c2:
+    st.caption("Dica: se o app estiver cacheado, use Salvar (ele já limpa cache e recarrega).")
 
 
