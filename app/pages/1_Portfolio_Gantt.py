@@ -1,17 +1,16 @@
 # app/pages/1_Portfolio_Gantt.py
 
-import re
-from datetime import date, timedelta
-
+import streamlit as st
 import pandas as pd
 import plotly.express as px
-import streamlit as st
+from datetime import date, timedelta
+import re
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
 
 st.set_page_config(page_title="Portfólio (Gantt)", layout="wide")
-st.title("Portfólio (Gantt) — MOCK")
+st.title("Portfólio (Gantt)")
 
 # Mantém como está (sem mexer em conexão)
 require_login()
@@ -29,12 +28,10 @@ def month_range(d: date):
     last = nxt - timedelta(days=1)
     return first, last
 
-
 def pt_weekday_letter(d: date) -> str:
     # Monday=0 ... Sunday=6  -> STQQSSD
     letters = ["S", "T", "Q", "Q", "S", "S", "D"]
     return letters[d.weekday()]
-
 
 # -----------------------------
 # Carregar dados da VIEW
@@ -43,7 +40,6 @@ def pt_weekday_letter(d: date) -> str:
 def fetch_portfolio_view():
     res = sb.table("v_portfolio_tasks").select("*").execute()
     return pd.DataFrame(res.data or [])
-
 
 df = fetch_portfolio_view()
 
@@ -56,14 +52,16 @@ if df.empty:
 # -----------------------------
 df["start_date"] = pd.to_datetime(df.get("start_date"), errors="coerce")
 df["end_date"] = pd.to_datetime(df.get("end_date"), errors="coerce")
-df["end_date"] = df["end_date"].fillna(df["start_date"])  # 1 dia
+
+# Se end_date estiver vazio, assume start_date (tarefa 1 dia)
+df["end_date"] = df["end_date"].fillna(df["start_date"])
 
 df = df.dropna(subset=["start_date", "end_date"]).copy()
 if df.empty:
     st.warning("Existem registros, mas sem start_date/end_date válidos.")
     st.stop()
 
-# Fallbacks de colunas esperadas
+# Fallbacks esperados na view
 if "project_code" not in df.columns:
     df["project_code"] = ""
 if "title" not in df.columns:
@@ -71,16 +69,17 @@ if "title" not in df.columns:
 if "tipo_atividade" not in df.columns:
     df["tipo_atividade"] = "CAMPO"
 
-# IMPORTANTE: agora a view pode ter assignee_names
+# >>> IMPORTANTE: após V2 da view, o nome recomendado é assignee_names
+# Se ainda existir assignee_name antigo, convertemos para assignee_names.
 if "assignee_names" not in df.columns:
-    # fallback se ainda existir assignee_name antigo
     if "assignee_name" in df.columns:
         df["assignee_names"] = df["assignee_name"].fillna("Profissional a definir")
     else:
         df["assignee_names"] = "Profissional a definir"
-df["assignee_names"] = df["assignee_names"].fillna("Profissional a definir")
+else:
+    df["assignee_names"] = df["assignee_names"].fillna("Profissional a definir")
 
-# Label do eixo Y igual mock: COD | Título
+# Label do eixo Y: COD | Título
 df["label"] = (
     df["project_code"].astype(str).fillna("").str.strip()
     + " | "
@@ -88,29 +87,27 @@ df["label"] = (
 ).str.strip(" |")
 
 # -----------------------------
-# Filtros (mock)
+# Filtros
 # -----------------------------
 today = date.today()
 d0, d1 = month_range(today)
 
-projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if str(p).strip() != ""])
-types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if str(t).strip() != ""])
+projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if str(p).strip()])
+types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if str(t).strip()])
 
-# Lista de profissionais (explode "Ana + Felipe + Yuri" -> ["Ana","Felipe","Yuri"])
-def split_people(s: str):
-    return [p.strip() for p in str(s).split("+") if p.strip()]
-
+# Pessoas: como assignee_names vem "A + B + C", montamos lista “explodindo”
 people_set = set()
-for s in df["assignee_names"].dropna().tolist():
-    for p in split_people(s):
-        people_set.add(p)
-
-people_all = sorted(list(people_set)) if people_set else ["Profissional a definir"]
+for s in df["assignee_names"].dropna().astype(str).tolist():
+    parts = [p.strip() for p in s.split("+")]
+    for p in parts:
+        if p:
+            people_set.add(p)
+people_all = sorted(people_set)
 
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 default_people = people_all  # começa com todos
 
-c1, c2, c3, c4 = st.columns([1.2, 1.3, 1.6, 1.2])
+c1, c2, c3, c4 = st.columns([1.2, 1.3, 1.8, 1.3])
 
 with c1:
     sel_project = st.selectbox("Projeto", projects, index=0)
@@ -144,14 +141,11 @@ if sel_types:
 else:
     f = f.iloc[0:0]
 
-# filtro de profissionais:
-# mantém tarefas onde assignee_names contém QUALQUER um selecionado
+# filtro por pessoas (regex com re.escape — corrigido)
 if sel_people:
-    patt = "|".join([re.escape(p.strip()) for p in sel_people if p and p.strip()])  # ✅ CORREÇÃO AQUI
+    patt = "|".join(re.escape(p.strip()) for p in sel_people if p and p.strip())
     if patt:
-        f = f[f["assignee_names"].astype(str).str.contains(patt, na=False, regex=True)]
-    else:
-        f = f.iloc[0:0]
+        f = f[f["assignee_names"].astype(str).str.contains(patt, regex=True, na=False)]
 else:
     f = f.iloc[0:0]
 
@@ -162,11 +156,11 @@ if f.empty:
     st.info("Ainda não há tarefas no portfólio (ou os filtros zeraram a lista).")
     st.stop()
 
-# Recorte visual (clamp)
+# clamp visual
 f["plot_start"] = f["start_date"].clip(lower=p_start_dt)
 f["plot_end"] = f["end_date"].clip(upper=p_end_dt)
 
-# Ordenação cronológica (eixo Y)
+# Ordem cronológica (eixo Y)
 order = (
     f.groupby("label")["plot_start"]
     .min()
@@ -175,16 +169,16 @@ order = (
     .tolist()
 )
 
-# Mostrar TODOS os nomes na barra (como você pediu)
+# Texto dentro da barra: TODOS os nomes
 f["bar_text"] = f["assignee_names"].astype(str)
 
 # -----------------------------
-# Cores (verde escuro / verde claro)
+# Cores (paleta verde)
 # -----------------------------
 color_map = {
     "CAMPO": "#1B5E20",
     "RELATORIO": "#66BB6A",
-    "ADMINISTRATIVO": "#2E7D32",  # pode ajustar depois
+    "ADMINISTRATIVO": "#2E7D32",  # mantém verde (ajusta depois se quiser outra cor)
 }
 
 # -----------------------------
@@ -203,17 +197,20 @@ fig = px.timeline(
         "title": True,
         "assignee_names": True,
         "tipo_atividade": True,
-        "status": True if "status" in f.columns else False,
-        "date_confidence": True if "date_confidence" in f.columns else False,
         "start_date": True,
         "end_date": True,
+        "label": False,
         "plot_start": False,
         "plot_end": False,
-        "label": False,
     },
 )
 
-fig.update_yaxes(categoryorder="array", categoryarray=order, title_text="Projeto / Tarefa", autorange="reversed")
+fig.update_yaxes(
+    categoryorder="array",
+    categoryarray=order,
+    title_text="Projeto / Tarefa",
+    autorange="reversed",
+)
 
 fig.update_traces(
     textposition="inside",
@@ -223,7 +220,7 @@ fig.update_traces(
 
 fig.update_xaxes(range=[p_start_dt, p_end_dt])
 
-# Ticks diários (STQQSSD + dia)
+# ticks diários (STQQSSD + dd/mm)
 days = pd.date_range(p_start_dt.date(), p_end_dt.date(), freq="D")
 tickvals = [pd.to_datetime(d) for d in days]
 ticktext = [f"{pt_weekday_letter(d.date())} {d.day:02d}/{d.month:02d}" for d in days]
@@ -238,7 +235,7 @@ fig.update_xaxes(
     title_text="",
 )
 
-# Faixas de fim de semana
+# fim de semana sombreado
 shapes = []
 for d in days:
     if d.weekday() >= 5:
