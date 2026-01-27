@@ -5,13 +5,19 @@ from datetime import date
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
-
+from ui.brand import apply_brand
 
 st.set_page_config(page_title="Projetos", layout="wide")
+apply_brand()
+
 require_login()
 sb = get_authed_client()
 
 st.title("Projetos")
+
+# ... (resto do seu código continua igual)
+
+
 
 @st.cache_data(ttl=20)
 def fetch_projects():

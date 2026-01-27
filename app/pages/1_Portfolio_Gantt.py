@@ -1,5 +1,4 @@
 # app/pages/1_Portfolio_Gantt.py
-
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -8,9 +7,19 @@ import re
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
+from ui.brand import apply_brand
 
 st.set_page_config(page_title="Portfólio (Gantt)", layout="wide")
+apply_brand()
+
+require_login()
+sb = get_authed_client()
+
 st.title("Portfólio (Gantt)")
+
+# ... (resto do seu código do Gantt continua igual)
+
+
 
 # Mantém como está (sem mexer em conexão)
 require_login()
