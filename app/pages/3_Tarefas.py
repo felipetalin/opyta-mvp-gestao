@@ -9,17 +9,15 @@ from services.supabase_client import get_authed_client
 from ui.brand import apply_brand
 
 st.set_page_config(page_title="Tarefas", layout="wide")
-apply_brand()
-apply_app_chrome()
-page_header("Tarefas", "Edição e controle", st.session_state.get("user_email", ""))
-
 
 require_login()
 sb = get_authed_client()
 
+apply_brand()
 st.title("Tarefas")
 
-# ... (resto do seu código continua igual)
+# ... resto do código continua igual ...
+
 
 
 
