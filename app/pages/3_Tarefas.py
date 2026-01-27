@@ -6,17 +6,28 @@ from datetime import date
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
+
 from ui.brand import apply_brand
+from ui.chrome import apply_app_chrome, page_header  # <-- IMPORTANTE
 
 st.set_page_config(page_title="Tarefas", layout="wide")
 
 require_login()
+apply_brand()
+apply_app_chrome()
+page_header("Tarefas", "Edição e controle", st.session_state.get("user_email", ""))
+
 sb = get_authed_client()
 
-apply_brand()
-st.title("Tarefas")
+# NÃO repita st.title aqui se page_header já mostra título
+# st.title("Tarefas")
 
 # ... resto do código continua igual ...
+
+
+# ... resto do seu código continua igual
+
+
 
 
 

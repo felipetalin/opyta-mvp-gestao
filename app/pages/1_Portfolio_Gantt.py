@@ -20,7 +20,7 @@ page_header("Portfólio (Gantt)", "Filtros + cronograma", st.session_state.get("
 require_login()
 sb = get_authed_client()
 
-st.title("Portfólio (Gantt)")
+
 
 # ... (resto do seu código do Gantt continua igual)
 

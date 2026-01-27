@@ -18,7 +18,6 @@ page_header("Projetos", "Cadastro e edição", st.session_state.get("user_email"
 require_login()
 sb = get_authed_client()
 
-st.title("Projetos")
 
 # ... (resto do seu código continua igual)
 
