@@ -1,5 +1,10 @@
-.venv/
+# Windows
+desktop.ini
+Thumbs.db
+
+# VSCode
+.vscode/
+
+# Python cache
 __pycache__/
 *.pyc
-.env
-data/
