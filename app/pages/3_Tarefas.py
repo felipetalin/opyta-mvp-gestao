@@ -36,7 +36,7 @@ TIPO_OPTIONS = ["CAMPO", "RELATORIO", "ADMINISTRATIVO"]
 DATE_CONFIDENCE_OPTIONS = ["PLANEJADO", "CONFIRMADO", "CANCELADO"]
 STATUS_DEFAULT = "PLANEJADA"  # coluna status ainda existe na tabela tasks
 
-PLACEHOLDER_PERSON_NAME = "Profissional a definir"  # você padronizou isso
+PLACEHOLDER_PERSON_NAME = "Profissional"  # você padronizou isso
 
 # ==========================================================
 # Helpers
@@ -158,20 +158,40 @@ project_id = df_projects.loc[df_projects["label"] == selected_label, "id"].iloc[
 # ==========================================================
 # People
 # ==========================================================
+if st.button("Recarregar profissionais"):
+    load_people.clear()
+    st.rerun()
+
+
 df_people, people_map = load_people()
 if df_people.empty:
     st.warning("Nenhum profissional encontrado na tabela people.")
     st.stop()
 
-# garante placeholder existir
-if PLACEHOLDER_PERSON_NAME not in people_map:
-    st.error(
-        f"Não achei '{PLACEHOLDER_PERSON_NAME}' na tabela people. "
-        f"Crie esse registro no Supabase para seguir."
-    )
+# garante placeholder existir (robusto)
+def _find_placeholder_id(people_df: pd.DataFrame, people_map: dict) -> str | None:
+    # 1) tenta match exato
+    if PLACEHOLDER_PERSON_NAME in people_map:
+        return people_map[PLACEHOLDER_PERSON_NAME]
+
+    # 2) tenta case-insensitive pelo nome "profissional"
+    for name, pid in people_map.items():
+        if str(name).strip().lower() == str(PLACEHOLDER_PERSON_NAME).strip().lower():
+            return pid
+
+    # 3) tenta qualquer um que comece com "profissional"
+    for name, pid in people_map.items():
+        if str(name).strip().lower().startswith("profissional"):
+            return pid
+
+    return None
+
+
+placeholder_id = _find_placeholder_id(df_people, people_map)
+if not placeholder_id:
+    st.error("Não encontrei placeholder 'Profissional' na tabela people. Crie/ajuste no Supabase.")
     st.stop()
 
-placeholder_id = people_map[PLACEHOLDER_PERSON_NAME]
 
 # ==========================================================
 # Nova tarefa
@@ -205,7 +225,7 @@ with st.container(border=True):
         "Responsáveis (multi)",
         options=df_people["name"].tolist(),
         default=[PLACEHOLDER_PERSON_NAME],
-        help="Selecione 1 ou mais profissionais. Se não souber, deixe 'Profissional a definir'.",
+        help="Selecione 1 ou mais profissionais. Se não souber, deixe 'Profissional'.",
     )
 
     notes = st.text_area("Observações", value="", height=90)
