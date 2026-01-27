@@ -1,0 +1,59 @@
+/* app/assets/brand.css */
+
+/* Paleta extraída da sua logo */
+:root{
+  --opyta-green: #507020;   /* verde principal */
+  --opyta-yellow:#F0C020;   /* amarelo/acento */
+  --bg-soft:     #F7F8F6;
+  --text-dark:   #1B1F17;
+}
+
+/* Fundo geral */
+.stApp{
+  background: var(--bg-soft);
+  color: var(--text-dark);
+}
+
+/* Sidebar */
+section[data-testid="stSidebar"]{
+  background: #ffffff;
+  border-right: 1px solid rgba(0,0,0,0.06);
+}
+
+/* Títulos */
+h1, h2, h3{
+  letter-spacing: -0.2px;
+}
+
+/* Botões (padrão) */
+.stButton > button{
+  background: var(--opyta-green);
+  color: #fff;
+  border: 1px solid rgba(0,0,0,0.06);
+  border-radius: 10px;
+  padding: 0.55rem 1rem;
+  font-weight: 600;
+}
+.stButton > button:hover{
+  filter: brightness(0.96);
+  border-color: rgba(0,0,0,0.10);
+}
+
+/* Botão secundário (quando Streamlit renderiza como secondary) */
+.stButton > button[kind="secondary"]{
+  background: #fff;
+  color: var(--opyta-green);
+  border: 1px solid rgba(80,112,32,0.35);
+}
+
+/* Inputs com um “ar” mais limpo */
+div[data-baseweb="input"] input,
+div[data-baseweb="textarea"] textarea,
+div[data-baseweb="select"] > div{
+  border-radius: 10px !important;
+}
+
+/* Pequenos cards/containers */
+div[data-testid="stVerticalBlockBorderWrapper"]{
+  border-radius: 14px;
+}
