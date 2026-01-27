@@ -1,77 +1,130 @@
 # app/ui/brand.py
-import base64
-from pathlib import Path
 import streamlit as st
+from pathlib import Path
 
-
-def _img_to_base64(path: str) -> str:
-    p = Path(path)
-    if not p.exists():
-        return ""
-    return base64.b64encode(p.read_bytes()).decode("utf-8")
+# Ajuste se sua logo estiver em outro caminho
+LOGO_PATH = Path(__file__).resolve().parents[1] / "assets" / "logo.png"
 
 
 def apply_brand():
     """
-    Aplica CSS global + logo no sidebar.
-    Espera a logo em: app/assets/logo.png
+    Tema/cores (tons de verde) + ajustes globais.
     """
-    logo_b64 = _img_to_base64("app/assets/logo.png")
+    st.markdown(
+        """
+        <style>
+          :root{
+            --opyta-green:#5E7D3A;
+            --opyta-green-2:#3F5E26;
+            --opyta-soft:#F3F6F0;
+            --opyta-border: rgba(90, 120, 60, 0.25);
+          }
 
-    css = """
-    <style>
-      .opyta-app { padding-top: 0.25rem; }
-      .opyta-topbar {
-        display:flex; align-items:center; justify-content:space-between;
-        padding: 0.6rem 0.8rem;
-        border: 1px solid rgba(0,0,0,0.08);
-        border-radius: 14px;
-        background: #ffffff;
-        box-shadow: 0 1px 10px rgba(0,0,0,0.04);
-        margin-bottom: 0.9rem;
-      }
-      .opyta-topbar .left { display:flex; flex-direction:column; gap:0.1rem; }
-      .opyta-title { font-size: 1.15rem; font-weight: 700; margin: 0; }
-      .opyta-subtitle { font-size: 0.85rem; opacity: 0.7; margin: 0; }
-      .opyta-user { font-size: 0.85rem; opacity: 0.75; }
-      /* melhora espaçamento padrão */
-      section.main > div { padding-top: 1rem; }
-    </style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
+          /* Fundo geral */
+          .stApp {
+            background: var(--opyta-soft);
+          }
 
-    if logo_b64:
-        st.sidebar.markdown(
-            f"""
-            <div style="display:flex;align-items:center;gap:10px;margin:6px 0 14px 0;">
-              <img src="data:image/png;base64,{logo_b64}" style="height:36px;border-radius:8px;" />
-              <div style="font-weight:700;font-size:1.0rem;">Opyta</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+          /* Títulos */
+          h1, h2, h3, h4 {
+            color: #1f2a17;
+          }
+
+          /* Containers/bordas suaves */
+          div[data-testid="stVerticalBlock"] > div:has(> div[data-testid="stContainer"]) {
+            border-color: var(--opyta-border);
+          }
+
+          /* Botão primário no verde */
+          .stButton > button[kind="primary"]{
+            background: var(--opyta-green);
+            border: 1px solid var(--opyta-green-2);
+          }
+          .stButton > button[kind="primary"]:hover{
+            background: var(--opyta-green-2);
+            border: 1px solid var(--opyta-green-2);
+          }
+
+          /* Inputs com foco verde */
+          .stTextInput input:focus,
+          .stTextArea textarea:focus,
+          .stSelectbox div:focus-within,
+          .stDateInput input:focus{
+            outline: none !important;
+            box-shadow: 0 0 0 0.2rem var(--opyta-border) !important;
+            border-color: var(--opyta-green) !important;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def apply_app_chrome():
     """
-    Placeholder para futuras melhorias (menu, espaçamentos, etc).
-    Mantive separado pra você evoluir sem mexer nas pages.
+    Sidebar + logo com tamanho consistente.
+    (Isso é o que evita a logo ficar minúscula.)
     """
-    st.markdown('<div class="opyta-app"></div>', unsafe_allow_html=True)
+    st.markdown(
+        """
+        <style>
+          /* Sidebar mais “corporativa” */
+          section[data-testid="stSidebar"]{
+            background: #eef3e9;
+            border-right: 1px solid rgba(90,120,60,0.18);
+          }
+
+          /* Padding interno da sidebar */
+          section[data-testid="stSidebar"] > div {
+            padding-top: 0.75rem;
+          }
+
+          /* Logo: força tamanho mínimo/consistente */
+          section[data-testid="stSidebar"] img {
+            width: 100% !important;
+            max-width: 220px !important;   /* ajuste fino */
+            height: auto !important;
+            margin: 0.75rem auto 0.25rem auto !important;
+            display: block;
+          }
+
+          /* Deixa o menu mais “limpo” */
+          section[data-testid="stSidebar"] a,
+          section[data-testid="stSidebar"] span {
+            font-size: 0.92rem;
+          }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.sidebar:
+        # use_container_width evita ficar “thumbnail”
+        if LOGO_PATH.exists():
+            st.image(str(LOGO_PATH), use_container_width=True)
+        else:
+            st.caption("Logo não encontrada em app/assets/logo.png")
 
 
 def page_header(title: str, subtitle: str = "", user_email: str = ""):
-    subtitle_html = f'<p class="opyta-subtitle">{subtitle}</p>' if subtitle else ""
-    user_html = f'<div class="opyta-user">{user_email}</div>' if user_email else ""
-
+    """
+    Cabeçalho padrão no topo da página (card).
+    """
     st.markdown(
         f"""
-        <div class="opyta-topbar">
-          <div class="left">
-            <p class="opyta-title">{title}</p>
-            {subtitle_html}
+        <div style="
+          background: white;
+          border: 1px solid rgba(90,120,60,0.18);
+          border-radius: 12px;
+          padding: 14px 16px;
+          margin-bottom: 14px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+            <div>
+              <div style="font-size: 18px; font-weight: 700; color: #1f2a17;">{title}</div>
+              <div style="font-size: 13px; color: rgba(31,42,23,0.75);">{subtitle}</div>
+            </div>
+            <div style="font-size: 12px; color: rgba(31,42,23,0.65);">{user_email}</div>
           </div>
-          {user_html}
         </div>
         """,
         unsafe_allow_html=True,
