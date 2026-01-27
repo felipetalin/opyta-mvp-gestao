@@ -10,7 +10,12 @@ from services.supabase_client import get_authed_client
 from ui.brand import apply_brand
 
 st.set_page_config(page_title="Portfólio (Gantt)", layout="wide")
+from ui.layout import apply_app_chrome, page_header, filter_bar_start
+
 apply_brand()
+apply_app_chrome()
+page_header("Portfólio (Gantt)", "Filtros + cronograma", st.session_state.get("user_email", ""))
+
 
 require_login()
 sb = get_authed_client()
@@ -116,7 +121,10 @@ people_all = sorted(people_set)
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 default_people = people_all  # começa com todos
 
-c1, c2, c3, c4 = st.columns([1.2, 1.3, 1.8, 1.3])
+with filter_bar_start():
+    c1, c2, c3, c4 = st.columns([1.2, 1.3, 1.6, 1.2])
+    # ... seus filtros iguais aqui dentro ...
+
 
 with c1:
     sel_project = st.selectbox("Projeto", projects, index=0)

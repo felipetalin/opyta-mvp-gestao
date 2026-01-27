@@ -8,7 +8,12 @@ from services.supabase_client import get_authed_client
 from ui.brand import apply_brand
 
 st.set_page_config(page_title="Projetos", layout="wide")
+from ui.layout import apply_app_chrome, page_header
+
 apply_brand()
+apply_app_chrome()
+page_header("Projetos", "Cadastro e edição", st.session_state.get("user_email", ""))
+
 
 require_login()
 sb = get_authed_client()

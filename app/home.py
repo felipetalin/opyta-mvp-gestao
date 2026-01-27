@@ -1,17 +1,19 @@
 import streamlit as st
+from ui.brand import apply_brand
+from ui.layout import apply_app_chrome, page_header
 
 from services.auth import require_login, logout
-from ui.brand import apply_brand
 
 st.set_page_config(page_title="Opyta - Gestão de Projetos (MVP)", layout="wide")
-apply_brand()
 
 require_login()
-
-st.title("Opyta - Gestão de Projetos (MVP)")
+apply_brand()
+apply_app_chrome()
 
 email = st.session_state.get("user_email", "")
-st.success(f"Logado como: {email}")
+page_header("Opyta - Gestão de Projetos (MVP)", "Ambiente de testes (MVP)", user_email=email)
+
+# (o resto do seu home continua igual)
 
 # (se você já tinha botões/atalhos aqui, mantém abaixo)
 
