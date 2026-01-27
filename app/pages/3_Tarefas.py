@@ -1,28 +1,22 @@
 # app/pages/3_Tarefas.py
-
 import streamlit as st
 import pandas as pd
 from datetime import date
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
-
-from ui.brand import apply_brand
-from ui.chrome import apply_app_chrome, page_header  # <-- IMPORTANTE
+from ui.brand import apply_brand, apply_app_chrome, page_header
 
 st.set_page_config(page_title="Tarefas", layout="wide")
 
-require_login()
 apply_brand()
 apply_app_chrome()
-page_header("Tarefas", "Edição e controle", st.session_state.get("user_email", ""))
 
+require_login()
 sb = get_authed_client()
 
-# NÃO repita st.title aqui se page_header já mostra título
-# st.title("Tarefas")
+page_header("Tarefas", "Edição e controle", st.session_state.get("user_email", ""))
 
-# ... resto do código continua igual ...
 
 
 # ... resto do seu código continua igual
