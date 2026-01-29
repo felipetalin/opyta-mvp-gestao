@@ -25,9 +25,6 @@ except Exception:
             st.caption(f"Logado como: {user_email}")
 
 
-# ==========================================================
-# Boot (ordem obrigatória)
-# ==========================================================
 st.set_page_config(page_title="Projetos", layout="wide")
 apply_brand()
 apply_app_chrome()
@@ -37,10 +34,6 @@ sb = get_authed_client()
 
 page_header("Projetos", "Cadastro e edição", st.session_state.get("user_email", ""))
 
-
-# ==========================================================
-# Helpers
-# ==========================================================
 STATUS_OPTIONS = ["ATIVO", "PAUSADO", "CONCLUIDO"]
 
 
@@ -75,6 +68,10 @@ def norm(x) -> str:
     return ("" if x is None else str(x)).strip()
 
 
+def safe_text_series(s: pd.Series) -> pd.Series:
+    return s.fillna("").astype(str).replace({"None": "", "nan": "", "NaT": ""})
+
+
 @st.cache_data(ttl=30)
 def fetch_projects():
     res = (
@@ -96,9 +93,6 @@ def upsert_project(project_id: str | None, payload: dict):
     return sb.table("projects").insert(payload).execute()
 
 
-# ==========================================================
-# Criar projeto
-# ==========================================================
 st.subheader("Criar projeto")
 
 with st.container(border=True):
@@ -144,32 +138,26 @@ with st.container(border=True):
                 st.code(_api_error_message(e))
 
 
-# ==========================================================
-# Lista + edição inline (UX refinada: ID escondido via index)
-# ==========================================================
 st.divider()
 st.subheader("Lista de Projetos (edite direto aqui)")
-
-st.info("✅ Edite na tabela e clique em **Salvar alterações**. (O ID fica oculto)")
+st.caption("✅ Edite na tabela e clique em **Salvar alterações**.")
 
 df = fetch_projects()
 if df.empty:
     st.info("Nenhum projeto cadastrado.")
     st.stop()
 
-df = df.copy()
-
 df_show = pd.DataFrame(
     {
-        "Código": df["project_code"].fillna("").astype(str),
-        "Nome": df["name"].fillna("").astype(str),
-        "Cliente": df["client"].fillna("").astype(str),
-        "Status": df["status"].fillna("ATIVO").astype(str),
-        "Início": df["start_date"].apply(to_date),
-        "Fim previsto": df["end_date_planned"].apply(to_date),
-        "Obs": df["notes"].fillna("").astype(str),
+        "Código": safe_text_series(df.get("project_code", pd.Series([], dtype=object))),
+        "Nome": safe_text_series(df.get("name", pd.Series([], dtype=object))),
+        "Cliente": safe_text_series(df.get("client", pd.Series([], dtype=object))),
+        "Status": safe_text_series(df.get("status", pd.Series([], dtype=object))).replace({"": "ATIVO"}),
+        "Início": df["start_date"].apply(to_date) if "start_date" in df.columns else None,
+        "Fim previsto": df["end_date_planned"].apply(to_date) if "end_date_planned" in df.columns else None,
+        "Obs": safe_text_series(df.get("notes", pd.Series([], dtype=object))),
     },
-    index=df["id"].astype(str),  # ✅ ID fica no index (oculto)
+    index=safe_text_series(df["id"]).replace({"": "SEM_ID"}) if "id" in df.columns else None,
 )
 
 edited = st.data_editor(
@@ -207,6 +195,9 @@ if save_inline:
         warnings: list[str] = []
 
         for project_id, ra in after.iterrows():
+            if project_id == "SEM_ID":
+                continue
+
             rb = before.loc[project_id]
 
             changed = False
@@ -246,5 +237,6 @@ if save_inline:
     except Exception as e:
         st.error("Erro ao salvar alterações:")
         st.code(_api_error_message(e))
+
 
 

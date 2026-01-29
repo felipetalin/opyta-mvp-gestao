@@ -82,6 +82,11 @@ def normalize_str(x) -> str:
     return ("" if x is None else str(x)).strip()
 
 
+def safe_text_series(s: pd.Series) -> pd.Series:
+    # evita "None" e "nan" virarem texto
+    return s.fillna("").astype(str).replace({"None": "", "nan": "", "NaT": ""})
+
+
 def split_assignees(text: str) -> list[str]:
     if not text:
         return []
@@ -179,7 +184,6 @@ if df_projects.empty:
 selected_label = st.selectbox("Projeto", df_projects["label"].tolist(), index=0)
 project_id = df_projects.loc[df_projects["label"] == selected_label, "id"].iloc[0]
 
-# People + placeholder
 df_people, people_map, _ = load_people(k)
 if df_people.empty:
     st.warning("Tabela people está vazia.")
@@ -277,11 +281,10 @@ with st.container(border=True):
 
 
 # ==========================================================
-# Lista (A2: exclusão explícita, impossível errar)
+# Lista (A2)
 # ==========================================================
 st.divider()
 st.subheader("Lista de tarefas (edite direto aqui)")
-
 st.caption("✅ Edite na tabela e clique em **Salvar alterações**. Para excluir, use o bloco vermelho abaixo.")
 
 df_tasks = load_tasks_for_project(k, project_id)
@@ -300,15 +303,19 @@ if "notes" not in df_tasks.columns:
 df_show = pd.DataFrame(
     {
         "Excluir?": False,
-        "Tarefa": df_tasks["title"].astype(str),
-        "Tipo": df_tasks["tipo_atividade"].astype(str),
-        "Responsável(is)": df_tasks["assignee_names"].fillna(PLACEHOLDER_PERSON_NAME).astype(str),
-        "Início": df_tasks["start_date"].apply(to_date),
-        "Fim": df_tasks["end_date"].apply(to_date),
-        "Status da data": df_tasks["date_confidence"].fillna("PLANEJADO").astype(str),
-        "Obs": df_tasks["notes"].fillna("").astype(str),
+        "Tarefa": safe_text_series(df_tasks.get("title", pd.Series([], dtype=object))),
+        "Tipo": safe_text_series(df_tasks.get("tipo_atividade", pd.Series([], dtype=object))),
+        "Responsável(is)": safe_text_series(df_tasks.get("assignee_names", pd.Series([], dtype=object))).replace(
+            {"": PLACEHOLDER_PERSON_NAME}
+        ),
+        "Início": df_tasks["start_date"].apply(to_date) if "start_date" in df_tasks.columns else None,
+        "Fim": df_tasks["end_date"].apply(to_date) if "end_date" in df_tasks.columns else None,
+        "Status da data": safe_text_series(df_tasks.get("date_confidence", pd.Series([], dtype=object))).replace(
+            {"": "PLANEJADO"}
+        ),
+        "Obs": safe_text_series(df_tasks.get("notes", pd.Series([], dtype=object))),
     },
-    index=df_tasks["ID"].astype(str),
+    index=safe_text_series(df_tasks["ID"]).replace({"": "SEM_ID"}) if "ID" in df_tasks.columns else None,
 )
 
 edited = st.data_editor(
@@ -328,14 +335,15 @@ edited = st.data_editor(
     },
 )
 
-# ---------- bloco explícito de exclusão ----------
 to_delete_ids = edited.index[edited["Excluir?"] == True].astype(str).tolist()  # noqa: E712
+to_delete_ids = [x for x in to_delete_ids if x and x != "SEM_ID"]
+
 if to_delete_ids:
     with st.container(border=True):
         st.error(f"🗑 Exclusão: você marcou **{len(to_delete_ids)}** tarefa(s).")
         titles = edited.loc[to_delete_ids, "Tarefa"].astype(str).tolist()
         st.write("**Tarefas marcadas:**")
-        st.write("\n".join([f"- {t}" for t in titles]))
+        st.write("\n".join([f"- {t}" for t in titles if t and t != "None"]))
 
         confirm_delete = st.checkbox("Confirmo a exclusão definitiva das tarefas marcadas", value=False)
 
@@ -356,7 +364,6 @@ if to_delete_ids:
 
 st.divider()
 
-# ---------- salvar apenas edições (sem excluir) ----------
 cbtn1, cbtn2 = st.columns([1, 1])
 save_inline = cbtn1.button("Salvar alterações", type="primary")
 reload_inline = cbtn2.button("Recarregar")
@@ -370,7 +377,6 @@ if save_inline:
         before = df_show.copy()
         after = edited.copy()
 
-        # salva apenas NÃO marcadas pra excluir
         after_updates = after[after["Excluir?"] != True].copy()  # noqa: E712
         before_updates = before.loc[after_updates.index].copy()
 
@@ -441,6 +447,7 @@ if save_inline:
     except Exception as e:
         st.error("Erro ao salvar alterações:")
         st.code(_api_error_message(e))
+
 
 
 
