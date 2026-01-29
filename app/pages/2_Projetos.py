@@ -1,106 +1,263 @@
 # app/pages/2_Projetos.py
-import streamlit as st
-import pandas as pd
+
 from datetime import date
+
+import pandas as pd
+import streamlit as st
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
-from ui.brand import apply_brand
 
+# Branding (não pode quebrar o app se faltar algo)
+try:
+    from ui.brand import apply_brand, apply_app_chrome, page_header
+except Exception:
+    from ui.brand import apply_brand  # type: ignore
+
+    def apply_app_chrome():  # type: ignore
+        return
+
+    def page_header(title, subtitle, user_email=""):  # type: ignore
+        st.title(title)
+        if subtitle:
+            st.caption(subtitle)
+        if user_email:
+            st.caption(f"Logado como: {user_email}")
+
+
+# ==========================================================
+# Boot (ordem obrigatória)
+# ==========================================================
 st.set_page_config(page_title="Projetos", layout="wide")
-from ui.layout import apply_app_chrome, page_header
-
 apply_brand()
 apply_app_chrome()
-page_header("Projetos", "Cadastro e edição", st.session_state.get("user_email", ""))
-
 
 require_login()
 sb = get_authed_client()
 
-
-# ... (resto do seu código continua igual)
-
+page_header("Projetos", "Cadastro e edição", st.session_state.get("user_email", ""))
 
 
-@st.cache_data(ttl=20)
+# ==========================================================
+# Helpers
+# ==========================================================
+STATUS_OPTIONS = ["ATIVO", "PAUSADO", "CONCLUIDO"]
+
+
+def _api_error_message(e: Exception) -> str:
+    try:
+        if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
+            d = e.args[0]
+            msg = d.get("message") or str(d)
+            details = d.get("details")
+            hint = d.get("hint")
+            out = msg
+            if hint:
+                out += f"\nHint: {hint}"
+            if details:
+                out += f"\nDetalhes: {details}"
+            return out
+        return str(e)
+    except Exception:
+        return "Erro desconhecido."
+
+
+def to_date(x):
+    if pd.isna(x) or x is None:
+        return None
+    try:
+        return pd.to_datetime(x).date()
+    except Exception:
+        return None
+
+
+def norm(x) -> str:
+    return ("" if x is None else str(x)).strip()
+
+
+@st.cache_data(ttl=30)
 def fetch_projects():
-    res = sb.table("projects").select(
-        "id,project_code,name,client,status,start_date,end_date_planned,notes,created_at"
-    ).order("created_at", desc=True).execute()
+    res = (
+        sb.table("projects")
+        .select("id,project_code,name,client,status,start_date,end_date_planned,notes,created_at")
+        .order("created_at", desc=True)
+        .execute()
+    )
     return pd.DataFrame(res.data or [])
 
-def upsert_project(project_id, payload):
+
+def refresh_projects_cache():
+    fetch_projects.clear()
+
+
+def upsert_project(project_id: str | None, payload: dict):
     if project_id:
         return sb.table("projects").update(payload).eq("id", project_id).execute()
     return sb.table("projects").insert(payload).execute()
 
-df = fetch_projects()
 
-st.subheader("Criar / Editar")
+# ==========================================================
+# Criar projeto
+# ==========================================================
+st.subheader("Criar projeto")
 
-mode = st.radio("Modo", ["Criar", "Editar"], horizontal=True)
+with st.container(border=True):
+    c1, c2, c3 = st.columns([1.2, 2.2, 1.6])
+    with c1:
+        new_code = st.text_input("Código", value="", placeholder="ex: BRACE001")
+    with c2:
+        new_name = st.text_input("Nome", value="")
+    with c3:
+        new_client = st.text_input("Cliente", value="")
 
-edit_row = None
-if mode == "Editar":
-    if df.empty:
-        st.info("Sem projetos para editar.")
-    else:
-        options = (df["project_code"].fillna("") + " — " + df["name"].fillna("")).tolist()
-        chosen = st.selectbox("Escolha um projeto", options)
-        idx = options.index(chosen)
-        edit_row = df.iloc[idx].to_dict()
+    c4, c5, c6 = st.columns([1.2, 1.2, 1.2])
+    with c4:
+        new_status = st.selectbox("Status", STATUS_OPTIONS, index=0)
+    with c5:
+        new_start = st.date_input("Início", value=date.today(), format="DD/MM/YYYY")
+    with c6:
+        new_end = st.date_input("Fim previsto", value=date.today(), format="DD/MM/YYYY")
 
-c1, c2, c3 = st.columns(3)
-with c1:
-    project_code = st.text_input("Código", value=(edit_row.get("project_code") if edit_row else ""))
-with c2:
-    name = st.text_input("Nome", value=(edit_row.get("name") if edit_row else ""))
-with c3:
-    client = st.text_input("Cliente", value=(edit_row.get("client") if edit_row else ""))
+    new_notes = st.text_area("Observações", value="", height=90)
 
-c4, c5, c6 = st.columns(3)
-with c4:
-    status = st.selectbox("Status", ["ATIVO", "PAUSADO", "CONCLUIDO"], index=0)
-    if edit_row and edit_row.get("status") in ["ATIVO", "PAUSADO", "CONCLUIDO"]:
-        status = edit_row.get("status")
-with c5:
-    start_date = st.date_input("Início", value=(pd.to_datetime(edit_row["start_date"]).date() if edit_row and edit_row.get("start_date") else date.today()))
-with c6:
-    end_date_planned = st.date_input("Fim previsto", value=(pd.to_datetime(edit_row["end_date_planned"]).date() if edit_row and edit_row.get("end_date_planned") else date.today()))
+    if st.button("Salvar projeto", type="primary"):
+        payload = {
+            "project_code": norm(new_code) or None,
+            "name": norm(new_name) or None,
+            "client": norm(new_client) or None,
+            "status": new_status,
+            "start_date": new_start.isoformat() if new_start else None,
+            "end_date_planned": new_end.isoformat() if new_end else None,
+            "notes": norm(new_notes) or None,
+        }
 
-notes = st.text_area("Observações", value=(edit_row.get("notes") if edit_row else ""))
+        if not payload["project_code"] or not payload["name"]:
+            st.error("Informe pelo menos Código e Nome.")
+        else:
+            try:
+                upsert_project(None, payload)
+                st.success("Projeto criado.")
+                refresh_projects_cache()
+                st.rerun()
+            except Exception as e:
+                st.error("Erro ao salvar projeto:")
+                st.code(_api_error_message(e))
 
-if st.button("Salvar projeto", type="primary"):
-    payload = {
-        "project_code": project_code.strip() or None,
-        "name": name.strip() or None,
-        "client": client.strip() or None,
-        "status": status,
-        "start_date": start_date.isoformat(),
-        "end_date_planned": end_date_planned.isoformat(),
-        "notes": notes.strip() or None,
-    }
-    project_id = edit_row.get("id") if edit_row else None
 
-    try:
-        upsert_project(project_id, payload)
-        st.success("Projeto salvo.")
-        st.cache_data.clear()
-        st.rerun()
-    except Exception as e:
-        st.error(f"Erro ao salvar projeto: {e}")
-
+# ==========================================================
+# Lista + edição inline
+# ==========================================================
 st.divider()
-st.subheader("Lista de Projetos")
+st.subheader("Lista de Projetos (edite direto aqui)")
+st.caption("💡 Edite na tabela e clique em **Salvar alterações**.")
 
 df = fetch_projects()
 if df.empty:
     st.info("Nenhum projeto cadastrado.")
-else:
-    st.dataframe(
-        df[["project_code", "name", "client", "status", "start_date", "end_date_planned"]],
-        use_container_width=True,
-        hide_index=True
-    )
+    st.stop()
+
+df = df.copy()
+
+df_show = pd.DataFrame(
+    {
+        "Código": df["project_code"].fillna("").astype(str),
+        "Nome": df["name"].fillna("").astype(str),
+        "Cliente": df["client"].fillna("").astype(str),
+        "Status": df["status"].fillna("ATIVO").astype(str),
+        "Início": df["start_date"].apply(to_date),
+        "Fim previsto": df["end_date_planned"].apply(to_date),
+        "Obs": df["notes"].fillna("").astype(str),
+        "ID": df["id"].astype(str),
+    }
+)
+
+edited = st.data_editor(
+    df_show,
+    use_container_width=True,
+    hide_index=True,
+    num_rows="fixed",
+    column_config={
+        "Código": st.column_config.TextColumn(width="medium", help="Código do projeto (editável)."),
+        "Nome": st.column_config.TextColumn(width="large"),
+        "Cliente": st.column_config.TextColumn(width="medium"),
+        "Status": st.column_config.SelectboxColumn(options=STATUS_OPTIONS, width="small"),
+        "Início": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Fim previsto": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Obs": st.column_config.TextColumn(width="large"),
+        "ID": st.column_config.TextColumn(disabled=True, width="medium"),
+    },
+)
+
+cbtn1, cbtn2 = st.columns([1, 1])
+save_inline = cbtn1.button("Salvar alterações", type="primary")
+reload_inline = cbtn2.button("Recarregar")
+
+if reload_inline:
+    refresh_projects_cache()
+    st.rerun()
+
+if save_inline:
+    try:
+        before = df_show.copy()
+        after = edited.copy()
+
+        compare_cols = ["Código", "Nome", "Cliente", "Status", "Início", "Fim previsto", "Obs"]
+
+        n_updates = 0
+        warnings: list[str] = []
+
+        for idx in after.index:
+            rb = before.loc[idx]
+            ra = after.loc[idx]
+
+            changed = False
+            for c in compare_cols:
+                vb = rb[c]
+                va = ra[c]
+                if isinstance(vb, date) and isinstance(va, date):
+                    if vb != va:
+                        changed = True
+                        break
+                else:
+                    if norm(vb) != norm(va):
+                        changed = True
+                        break
+
+            if not changed:
+                continue
+
+            project_id = norm(ra["ID"])
+            if not project_id:
+                continue
+
+            code = norm(ra["Código"])
+            name = norm(ra["Nome"])
+            if not code or not name:
+                warnings.append(f"Linha {idx+1}: Código e Nome são obrigatórios (update ignorado).")
+                continue
+
+            payload = {
+                "project_code": code,
+                "name": name,
+                "client": norm(ra["Cliente"]) or None,
+                "status": norm(ra["Status"]) if norm(ra["Status"]) in STATUS_OPTIONS else "ATIVO",
+                "start_date": ra["Início"].isoformat() if ra["Início"] else None,
+                "end_date_planned": ra["Fim previsto"].isoformat() if ra["Fim previsto"] else None,
+                "notes": norm(ra["Obs"]) or None,
+            }
+
+            sb.table("projects").update(payload).eq("id", project_id).execute()
+            n_updates += 1
+
+        if warnings:
+            st.warning("\n".join(warnings))
+
+        st.success(f"Atualizados: {n_updates}")
+        refresh_projects_cache()
+        st.rerun()
+
+    except Exception as e:
+        st.error("Erro ao salvar alterações:")
+        st.code(_api_error_message(e))
+
 
