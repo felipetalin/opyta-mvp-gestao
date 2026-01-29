@@ -41,6 +41,24 @@ def month_range(d: date):
     return first, last
 
 
+def shift_month_first(d: date, delta: int) -> date:
+    """Retorna o primeiro dia do mês deslocado."""
+    y = d.year
+    m = d.month + delta
+    while m > 12:
+        y += 1
+        m -= 12
+    while m < 1:
+        y -= 1
+        m += 12
+    return date(y, m, 1)
+
+
+def month_label(d: date) -> str:
+    meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+    return f"{meses[d.month-1]}/{d.year}"
+
+
 def pt_weekday_letter(d: date) -> str:
     letters = ["S", "T", "Q", "Q", "S", "S", "D"]  # Mon..Sun
     return letters[d.weekday()]
@@ -59,21 +77,39 @@ def safe_text(x, default=""):
     return s
 
 
-def month_label(d: date) -> str:
-    meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
-    return f"{meses[d.month-1]}/{d.year}"
+def normalize_status(x: str) -> str:
+    return safe_text(x).upper().strip()
 
 
-def shift_month(d: date, delta: int) -> date:
-    y = d.year
-    m = d.month + delta
-    while m > 12:
-        y += 1
-        m -= 12
-    while m < 1:
-        y -= 1
-        m += 12
-    return date(y, m, 1)
+def make_period_presets(today_: date):
+    """
+    Presets:
+      - 1 mês (mês atual)
+      - 2 meses (mês atual + próximo)
+      - 3 meses (mês atual + 2 próximos)
+      - mês anterior + atual
+      - atual + próximo
+      - manual
+    """
+    cur_first = shift_month_first(today_, 0)
+    prev_first = shift_month_first(today_, -1)
+    next_first = shift_month_first(today_, 1)
+    next2_first = shift_month_first(today_, 2)
+
+    cur_start, cur_end = month_range(cur_first)
+    prev_start, prev_end = month_range(prev_first)
+    next_start, next_end = month_range(next_first)
+    next2_start, next2_end = month_range(next2_first)
+
+    presets = [
+        ("(manual)", None, None),
+        (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
+        (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
+        (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
+        (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
+        (f"Atual + próximo ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
+    ]
+    return presets
 
 
 # ==========================================================
@@ -122,6 +158,8 @@ df["assignee_names"] = df["assignee_names"].fillna("Profissional")
 if "status" not in df.columns:
     df["status"] = ""
 
+df["status_norm"] = df["status"].apply(normalize_status)
+
 # Label no eixo Y
 df["label"] = (
     df["project_code"].astype(str).fillna("").str.strip()
@@ -150,19 +188,13 @@ people_all = sorted(people_set)
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 default_people = people_all
 
-# Atalho mês
-month_options = []
-for delta in [-2, -1, 0, 1, 2]:
-    md = shift_month(today, delta)
-    mstart, mend = month_range(md)
-    key = month_label(md)
-    month_options.append((key, mstart, mend))
-
-month_labels = ["(manual)"] + [m[0] for m in month_options]
-default_month_index = month_labels.index(month_label(today)) if month_label(today) in month_labels else 0
+# Presets de período (inclui multi-mês)
+presets = make_period_presets(today)
+preset_labels = [p[0] for p in presets]
+default_preset_index = 1 if len(preset_labels) > 1 else 0  # "Mês atual" como default
 
 with filter_bar_start():
-    c1, c2, c3, c4, c5 = st.columns([1.2, 1.7, 2.3, 1.2, 1.0])
+    c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.7, 2.3, 1.7, 1.0, 1.1])
 
     with c1:
         sel_project = st.selectbox("Projeto", projects, index=0)
@@ -174,14 +206,17 @@ with filter_bar_start():
         sel_people = st.multiselect("Profissionais", people_all, default=default_people)
 
     with c4:
-        sel_month = st.selectbox("Atalho (mês)", month_labels, index=default_month_index)
+        sel_period_preset = st.selectbox("Atalho (período)", preset_labels, index=default_preset_index)
 
     with c5:
         show_status = st.toggle("Status na barra", value=False)
 
-# Período: mês força range do mês; senão manual
-if sel_month != "(manual)":
-    chosen = [x for x in month_options if x[0] == sel_month][0]
+    with c6:
+        show_cancelled = st.toggle("Mostrar canceladas", value=True)
+
+# Resolve período
+chosen = [p for p in presets if p[0] == sel_period_preset][0]
+if chosen[0] != "(manual)":
     p_start, p_end = chosen[1], chosen[2]
     st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 else:
@@ -216,6 +251,10 @@ if sel_people:
 else:
     f = f.iloc[0:0]
 
+# Mostrar/ocultar canceladas
+if not show_cancelled:
+    f = f[f["status_norm"] != "CANCELADA"]
+
 # interseção com janela
 f = f[(f["start_date"] <= p_end_dt) & (f["end_date"] >= p_start_dt)].copy()
 
@@ -237,20 +276,28 @@ order = (
 )
 
 # Texto dentro da barra
+status_icon = {
+    "CONCLUIDA": "✓",
+    "EM_ANDAMENTO": "…",
+    "AGUARDANDO_CONFIRMACAO": "⏳",
+    "PLANEJADA": "",
+    "CANCELADA": "✖",
+}
 if show_status:
-    status_icon = {
-        "CONCLUIDA": "✓",
-        "EM_ANDAMENTO": "…",
-        "AGUARDANDO_CONFIRMACAO": "⏳",
-        "PLANEJADA": "",
-        "CANCELADA": "✖",
-    }
     f["bar_text"] = f.apply(
-        lambda r: (status_icon.get(safe_text(r.get("status")).upper(), "") + " " + safe_text(r.get("assignee_names"))).strip(),
+        lambda r: (status_icon.get(safe_text(r.get("status_norm")), "") + " " + safe_text(r.get("assignee_names"))).strip(),
         axis=1,
     )
 else:
-    f["bar_text"] = f["assignee_names"].astype(str)
+    # mesmo sem toggle, cancelada recebe ícone (ajuda leitura e justifica “apagado”)
+    f["bar_text"] = f.apply(
+        lambda r: (("✖ " if safe_text(r.get("status_norm")) == "CANCELADA" else "") + safe_text(r.get("assignee_names"))).strip(),
+        axis=1,
+    )
+
+# opacidade: canceladas “apagadas”
+f["opacity"] = f["status_norm"].apply(lambda s: 0.35 if s == "CANCELADA" else 1.0)
+
 
 # ==========================================================
 # Cores
@@ -260,6 +307,7 @@ color_map = {
     "RELATORIO": "#66BB6A",
     "ADMINISTRATIVO": "#2F6DAE",  # distinto do CAMPO
 }
+
 
 # ==========================================================
 # Gantt
@@ -293,10 +341,12 @@ fig.update_yaxes(
     autorange="reversed",
 )
 
+# Aplica opacidade por ponto (canceladas apagadas)
 fig.update_traces(
     textposition="inside",
     insidetextanchor="middle",
     cliponaxis=False,
+    opacity=f["opacity"].tolist(),
 )
 
 fig.update_xaxes(range=[p_start_dt, p_end_dt])
@@ -368,12 +418,39 @@ fig.update_layout(height=max(420, 80 + row_count * 55))
 
 st.plotly_chart(fig, use_container_width=True)
 
+
+# ==========================================================
+# Export CSV do filtro (rápido)
+# ==========================================================
+export_cols = [
+    c for c in [
+        "project_code",
+        "title",
+        "tipo_atividade",
+        "assignee_names",
+        "status",
+        "start_date",
+        "end_date",
+    ] if c in f.columns
+]
+export_df = f[export_cols].copy()
+export_df["start_date"] = export_df["start_date"].dt.date
+export_df["end_date"] = export_df["end_date"].dt.date
+
+st.download_button(
+    "Baixar CSV do filtro",
+    data=export_df.to_csv(index=False).encode("utf-8"),
+    file_name="portfolio_filtrado.csv",
+    mime="text/csv",
+)
+
 with st.expander("Dados (opcional)"):
     st.dataframe(
         f.sort_values(["plot_start", "plot_end"], na_position="last"),
         use_container_width=True,
         hide_index=True,
     )
+
 
 
 
