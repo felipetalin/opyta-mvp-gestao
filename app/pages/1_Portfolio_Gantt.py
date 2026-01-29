@@ -10,13 +10,12 @@ import streamlit as st
 from services.auth import require_login
 from services.supabase_client import get_authed_client
 
-# Branding / Chrome
 from ui.brand import apply_brand, apply_app_chrome, page_header
 from ui.layout import filter_bar_start
 
 
 # ==========================================================
-# Boot (ordem obrigatória)
+# Boot
 # ==========================================================
 st.set_page_config(page_title="Portfólio (Gantt)", layout="wide")
 apply_brand()
@@ -80,6 +79,15 @@ def normalize_status(x: str) -> str:
     return safe_text(x).upper().strip()
 
 
+def split_people(assignee_names: str) -> list[str]:
+    out = []
+    for p in str(assignee_names or "").split("+"):
+        t = p.strip()
+        if t:
+            out.append(t)
+    return out
+
+
 def make_period_presets(today_: date):
     cur_first = shift_month_first(today_, 0)
     prev_first = shift_month_first(today_, -1)
@@ -91,166 +99,325 @@ def make_period_presets(today_: date):
     _, next_end = month_range(next_first)
     _, next2_end = month_range(next2_first)
 
-    presets = [
+    return [
         ("(manual)", None, None),
         (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
         (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
         (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
         (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
     ]
-    return presets
+
+
+def _api_error_message(e: Exception) -> str:
+    try:
+        if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
+            d = e.args[0]
+            msg = d.get("message") or str(d)
+            details = d.get("details")
+            hint = d.get("hint")
+            out = msg
+            if hint:
+                out += f"\nHint: {hint}"
+            if details:
+                out += f"\nDetalhes: {details}"
+            return out
+        return str(e)
+    except Exception:
+        return "Erro desconhecido."
 
 
 # ==========================================================
-# Load (view)
+# Data sources (projects + presets)
 # ==========================================================
+@st.cache_data(ttl=60)
+def load_projects_codes():
+    res = sb.table("projects").select("project_code").order("project_code").execute()
+    rows = res.data or []
+    codes = [safe_text(r.get("project_code")) for r in rows]
+    codes = [c for c in codes if c]
+    return ["Todos"] + sorted(set(codes))
+
+
 @st.cache_data(ttl=30)
-def fetch_portfolio_view():
-    res = sb.table("v_portfolio_tasks").select("*").execute()
+def load_presets():
+    # RLS: só retorna do usuário logado
+    res = sb.table("user_filter_presets").select("name,payload,updated_at").order("updated_at", desc=True).execute()
+    rows = res.data or []
+    presets = {r["name"]: r.get("payload") for r in rows if r.get("name")}
+    names = list(presets.keys())
+    return names, presets
+
+
+def save_preset(name: str, payload: dict):
+    # upsert pelo unique(owner_id, name)
+    sb.table("user_filter_presets").upsert(
+        {"name": name, "payload": payload},
+        on_conflict="owner_id,name",
+    ).execute()
+
+
+def delete_preset(name: str):
+    sb.table("user_filter_presets").delete().eq("name", name).execute()
+
+
+# ==========================================================
+# Fetch portfolio (performance)
+# ==========================================================
+PORTFOLIO_COLS = (
+    "task_id,project_id,project_code,title,tipo_atividade,start_date,end_date,status,assignee_names"
+)
+
+@st.cache_data(ttl=30)
+def fetch_portfolio(project_code: str | None, p_start: str, p_end: str, tipo_list: tuple[str, ...], show_cancelled: bool):
+    """
+    Performance:
+    - Não usa select("*")
+    - Filtra no Supabase por projeto + interseção de datas + tipo + canceladas (se desligado)
+    """
+    q = sb.table("v_portfolio_tasks").select(PORTFOLIO_COLS)
+
+    if project_code and project_code != "Todos":
+        q = q.eq("project_code", project_code)
+
+    # overlap: start_date <= p_end AND end_date >= p_start
+    q = q.lte("start_date", p_end).gte("end_date", p_start)
+
+    if tipo_list:
+        # supabase-py suporta in_()
+        q = q.in_("tipo_atividade", list(tipo_list))
+
+    if not show_cancelled:
+        q = q.neq("status", "CANCELADA")
+
+    res = q.execute()
     return pd.DataFrame(res.data or [])
 
 
-df = fetch_portfolio_view()
+# ==========================================================
+# Session defaults (para presets)
+# ==========================================================
+today = date.today()
+d0, d1 = month_range(today)
+presets_period = make_period_presets(today)
+preset_period_labels = [p[0] for p in presets_period]
+
+def _ss_setdefault(k, v):
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+_ss_setdefault("pf_project", "Todos")
+_ss_setdefault("pf_types", ["CAMPO", "RELATORIO", "ADMINISTRATIVO"])
+_ss_setdefault("pf_people", [])
+_ss_setdefault("pf_period_preset", preset_period_labels[1] if len(preset_period_labels) > 1 else "(manual)")
+_ss_setdefault("pf_manual_start", d0)
+_ss_setdefault("pf_manual_end", d1)
+_ss_setdefault("pf_show_status", False)
+_ss_setdefault("pf_show_cancelled", True)
+
+
+# ==========================================================
+# Presets UI (load/save/delete) + filtros
+# ==========================================================
+project_options = load_projects_codes()
+preset_names, preset_map = load_presets()
+
+# garante que selection não explode
+if st.session_state["pf_project"] not in project_options:
+    st.session_state["pf_project"] = "Todos"
+
+types_all = ["CAMPO", "RELATORIO", "ADMINISTRATIVO"]
+
+with filter_bar_start():
+    top1, top2 = st.columns([2.3, 1.7])
+
+    with top1:
+        c_p, c_t, c_pe = st.columns([1.1, 1.6, 2.2])
+
+        with c_p:
+            st.selectbox("Projeto", project_options, key="pf_project")
+
+        with c_t:
+            st.multiselect("Tipo Atividade", types_all, key="pf_types")
+
+        # período preset
+        c_per1, c_per2, c_per3 = st.columns([1.7, 1.2, 1.2])
+        with c_per1:
+            st.selectbox("Atalho (período)", preset_period_labels, key="pf_period_preset")
+        with c_per2:
+            st.toggle("Status na barra", key="pf_show_status")
+        with c_per3:
+            st.toggle("Mostrar canceladas", key="pf_show_cancelled")
+
+    with top2:
+        st.caption("Presets")
+        preset_sel = st.selectbox("Carregar preset", ["—"] + preset_names, index=0, key="pf_preset_sel")
+
+        b1, b2, b3 = st.columns([1, 1, 1])
+        with b1:
+            do_load = st.button("Carregar", use_container_width=True)
+        with b2:
+            do_delete = st.button("Excluir", use_container_width=True)
+        with b3:
+            do_save = st.button("Salvar", type="primary", use_container_width=True)
+
+        preset_name_input = st.text_input("Nome do preset", value="", placeholder="Ex: 2 meses + Todos + Campo", key="pf_preset_name")
+
+# Ação: carregar preset
+if do_load and preset_sel != "—":
+    payload = preset_map.get(preset_sel) or {}
+    # aplica em session_state (chaves dos widgets)
+    for k, v in payload.items():
+        st.session_state[k] = v
+    st.rerun()
+
+# Ação: excluir preset
+if do_delete:
+    if preset_sel == "—":
+        st.warning("Selecione um preset para excluir.")
+    else:
+        try:
+            delete_preset(preset_sel)
+            load_presets.clear()
+            st.success("Preset excluído.")
+            st.rerun()
+        except Exception as e:
+            st.error("Erro ao excluir preset:")
+            st.code(_api_error_message(e))
+
+# Resolve período (preset ou manual)
+chosen_period = [p for p in presets_period if p[0] == st.session_state["pf_period_preset"]][0]
+if chosen_period[0] != "(manual)":
+    p_start, p_end = chosen_period[1], chosen_period[2]
+    st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
+else:
+    # manual
+    period = st.date_input(
+        "Período (manual)",
+        value=(st.session_state["pf_manual_start"], st.session_state["pf_manual_end"]),
+        format="DD/MM/YYYY",
+    )
+    if isinstance(period, tuple) and len(period) == 2:
+        p_start, p_end = period
+    else:
+        p_start, p_end = d0, d1
+    st.session_state["pf_manual_start"] = p_start
+    st.session_state["pf_manual_end"] = p_end
+
+# Ação: salvar preset (salva após termos p_start/p_end resolvidos)
+if do_save:
+    name = (st.session_state.get("pf_preset_name") or "").strip()
+    if not name:
+        st.warning("Informe um nome para o preset.")
+    else:
+        payload = {
+            "pf_project": st.session_state["pf_project"],
+            "pf_types": st.session_state["pf_types"],
+            "pf_people": st.session_state["pf_people"],
+            "pf_period_preset": st.session_state["pf_period_preset"],
+            "pf_manual_start": st.session_state["pf_manual_start"],
+            "pf_manual_end": st.session_state["pf_manual_end"],
+            "pf_show_status": st.session_state["pf_show_status"],
+            "pf_show_cancelled": st.session_state["pf_show_cancelled"],
+        }
+        try:
+            save_preset(name, payload)
+            load_presets.clear()
+            st.success("Preset salvo.")
+            st.rerun()
+        except Exception as e:
+            st.error("Erro ao salvar preset:")
+            st.code(_api_error_message(e))
+
+
+# ==========================================================
+# Fetch otimizado (Supabase) -> opções de pessoas -> filtro final
+# ==========================================================
+p_start_dt = pd.to_datetime(p_start)
+p_end_dt = pd.to_datetime(p_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+
+sel_project = st.session_state["pf_project"]
+sel_types = st.session_state["pf_types"] or []
+sel_types_tuple = tuple(sel_types)
+
+show_cancelled = bool(st.session_state["pf_show_cancelled"])
+show_status = bool(st.session_state["pf_show_status"])
+
+# 1) Busca já filtrada no servidor (projeto + período + tipo + canceladas)
+df = fetch_portfolio(
+    None if sel_project == "Todos" else sel_project,
+    p_start.isoformat(),
+    p_end.isoformat(),
+    sel_types_tuple,
+    show_cancelled,
+)
 
 if df.empty:
-    st.warning("Nenhuma tarefa encontrada na view v_portfolio_tasks.")
+    st.info("Ainda não há tarefas no portfólio (ou os filtros zeraram a lista).")
     st.stop()
 
-# Datas
+# Normalizações (defensivo)
 df["start_date"] = to_dt(df.get("start_date"))
 df["end_date"] = to_dt(df.get("end_date"))
-
 df["end_date"] = df["end_date"].fillna(df["start_date"])
 df = df.dropna(subset=["start_date", "end_date"]).copy()
 if df.empty:
-    st.warning("Existem registros, mas sem start_date/end_date válidos.")
+    st.info("Registros sem datas válidas após normalização.")
     st.stop()
 
-# Fallbacks esperados
-if "project_code" not in df.columns:
-    df["project_code"] = ""
-if "title" not in df.columns:
-    df["title"] = ""
-if "tipo_atividade" not in df.columns:
-    df["tipo_atividade"] = "CAMPO"
+for col, default in [
+    ("project_code", ""),
+    ("title", ""),
+    ("tipo_atividade", "CAMPO"),
+    ("assignee_names", "Profissional"),
+    ("status", ""),
+]:
+    if col not in df.columns:
+        df[col] = default
+    df[col] = df[col].fillna(default)
 
-# assignee_names
-if "assignee_names" not in df.columns:
-    if "assignee_name" in df.columns:
-        df["assignee_names"] = df["assignee_name"].fillna("Profissional")
-    else:
-        df["assignee_names"] = "Profissional"
-df["assignee_names"] = df["assignee_names"].fillna("Profissional")
-
-# status (pode existir ou não)
-if "status" not in df.columns:
-    df["status"] = ""
 df["status_norm"] = df["status"].apply(normalize_status)
 
-# Label eixo Y
+# eixo Y
 df["label"] = (
     df["project_code"].astype(str).fillna("").str.strip()
     + " | "
     + df["title"].astype(str).fillna("").str.strip()
 ).str.strip(" |")
 
-
-# ==========================================================
-# Filtros
-# ==========================================================
-today = date.today()
-d0, d1 = month_range(today)
-
-projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if safe_text(p)])
-types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if safe_text(t)])
-
-# Pessoas: "A + B + C"
+# 2) Pessoas disponíveis (do dataset já filtrado)
 people_set = set()
-for s in df["assignee_names"].dropna().astype(str).tolist():
-    for p in [x.strip() for x in s.split("+")]:
-        if p:
-            people_set.add(p)
+for s in df["assignee_names"].astype(str).tolist():
+    for p in split_people(s):
+        people_set.add(p)
 people_all = sorted(people_set)
 
-default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
-default_people = people_all
+# garante que o preset não “quebra” o multiselect (inclui os selecionados)
+people_opts = sorted(set(people_all) | set(st.session_state.get("pf_people") or []))
 
-presets = make_period_presets(today)
-preset_labels = [p[0] for p in presets]
-default_preset_index = 1 if len(preset_labels) > 1 else 0  # mês atual
+# multiselect de pessoas (fora do filter_bar_start, mas ainda em cima)
+sel_people = st.multiselect("Profissionais (refinar)", people_opts, default=st.session_state.get("pf_people") or [], key="pf_people")
 
-with filter_bar_start():
-    c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.7, 2.3, 1.7, 1.0, 1.1])
-
-    with c1:
-        sel_project = st.selectbox("Projeto", projects, index=0)
-
-    with c2:
-        sel_types = st.multiselect("Tipo Atividade", types_all, default=default_types)
-
-    with c3:
-        sel_people = st.multiselect("Profissionais", people_all, default=default_people)
-
-    with c4:
-        sel_period_preset = st.selectbox("Atalho (período)", preset_labels, index=default_preset_index)
-
-    with c5:
-        show_status = st.toggle("Status na barra", value=False)
-
-    with c6:
-        show_cancelled = st.toggle("Mostrar canceladas", value=True)
-
-# Resolve período
-chosen = [p for p in presets if p[0] == sel_period_preset][0]
-if chosen[0] != "(manual)":
-    p_start, p_end = chosen[1], chosen[2]
-    st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
-else:
-    period = st.date_input("Período", value=(d0, d1), format="DD/MM/YYYY")
-    if isinstance(period, tuple) and len(period) == 2:
-        p_start, p_end = period
-    else:
-        p_start, p_end = d0, d1
-
-p_start_dt = pd.to_datetime(p_start)
-p_end_dt = pd.to_datetime(p_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-
-
-# ==========================================================
-# Aplicar filtros
-# ==========================================================
+# 3) Filtro pessoas (client-side)
 f = df.copy()
-
-if sel_project != "Todos":
-    f = f[f["project_code"] == sel_project]
-
-if sel_types:
-    f = f[f["tipo_atividade"].isin(sel_types)]
-else:
-    f = f.iloc[0:0]
-
 if sel_people:
     patt = "|".join(re.escape(p.strip()) for p in sel_people if p and p.strip())
     if patt:
         f = f[f["assignee_names"].astype(str).str.contains(patt, regex=True, na=False)]
 else:
-    f = f.iloc[0:0]
+    # se usuário removeu tudo, mantém tudo (mais amigável)
+    f = f
 
-if not show_cancelled:
-    f = f[f["status_norm"] != "CANCELADA"]
-
-# interseção com janela
+# Interseção final com janela (defensivo)
 f = f[(f["start_date"] <= p_end_dt) & (f["end_date"] >= p_start_dt)].copy()
-
 if f.empty:
-    st.info("Ainda não há tarefas no portfólio (ou os filtros zeraram a lista).")
+    st.info("Sem tarefas após filtro de profissionais.")
     st.stop()
 
-# clamp visual
+# Clamp visual
 f["plot_start"] = f["start_date"].clip(lower=p_start_dt)
 f["plot_end"] = f["end_date"].clip(upper=p_end_dt)
 
-# ordem cronológica
+# Ordem
 order = (
     f.groupby("label")["plot_start"]
     .min()
@@ -259,7 +426,7 @@ order = (
     .tolist()
 )
 
-# Texto na barra
+# Texto barra
 status_icon = {
     "CONCLUIDA": "✓",
     "EM_ANDAMENTO": "…",
@@ -278,19 +445,16 @@ else:
         axis=1,
     )
 
-# >>> Estilo canceladas: cria categoria separada para cor cinza
+# Canceladas: categoria separada (cinza)
 f["tipo_plot"] = f["tipo_atividade"].astype(str)
 f.loc[f["status_norm"] == "CANCELADA", "tipo_plot"] = "CANCELADA"
 
-
-# ==========================================================
 # Cores
-# ==========================================================
 color_map = {
     "CAMPO": "#1B5E20",
     "RELATORIO": "#66BB6A",
     "ADMINISTRATIVO": "#2F6DAE",
-    "CANCELADA": "#9E9E9E",  # cinza
+    "CANCELADA": "#9E9E9E",
 }
 
 
@@ -405,20 +569,11 @@ st.plotly_chart(fig, use_container_width=True)
 # ==========================================================
 # Export CSV do filtro
 # ==========================================================
-export_cols = [
-    c for c in [
-        "project_code",
-        "title",
-        "tipo_atividade",
-        "assignee_names",
-        "status",
-        "start_date",
-        "end_date",
-    ] if c in f.columns
-]
+export_cols = ["project_code", "title", "tipo_atividade", "assignee_names", "status", "start_date", "end_date"]
+export_cols = [c for c in export_cols if c in f.columns]
 export_df = f[export_cols].copy()
-export_df["start_date"] = export_df["start_date"].dt.date
-export_df["end_date"] = export_df["end_date"].dt.date
+export_df["start_date"] = to_dt(export_df["start_date"]).dt.date
+export_df["end_date"] = to_dt(export_df["end_date"]).dt.date
 
 st.download_button(
     "Baixar CSV do filtro",
@@ -432,6 +587,8 @@ with st.expander("Dados (opcional)"):
         f.sort_values(["plot_start", "plot_end"], na_position="last"),
         use_container_width=True,
         hide_index=True,
+    )
+
     )
 
 
