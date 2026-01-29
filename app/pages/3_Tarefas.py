@@ -27,6 +27,9 @@ except Exception:
         if user_email:
             st.caption(f"Logado como: {user_email}")
 
+            st.error("RODANDO ARQUIVO NOVO - BUILD 2026-01-29")
+
+
 
 # ==========================================================
 # Config (alinhado com constraints do Supabase)
