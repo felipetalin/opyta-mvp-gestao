@@ -82,9 +82,15 @@ def normalize_str(x) -> str:
     return ("" if x is None else str(x)).strip()
 
 
-def safe_text_series(s: pd.Series) -> pd.Series:
-    # evita "None" e "nan" virarem texto
-    return s.fillna("").astype(str).replace({"None": "", "nan": "", "NaT": ""})
+def safe_text_list(series: pd.Series, default: str = "") -> list[str]:
+    out: list[str] = []
+    for v in series.tolist():
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            out.append(default)
+        else:
+            s = str(v).strip()
+            out.append("" if s in ("None", "nan", "NaT") else s)
+    return out
 
 
 def split_assignees(text: str) -> list[str]:
@@ -147,25 +153,14 @@ def load_people(_k: str):
 @st.cache_data(ttl=30)
 def load_tasks_for_project(_k: str, project_id: str):
     cols_try = "task_id, project_id, title, tipo_atividade, start_date, end_date, date_confidence, status, assignee_names, notes"
-    try:
-        res = (
-            sb.table("v_portfolio_tasks")
-            .select(cols_try)
-            .eq("project_id", project_id)
-            .order("start_date")
-            .execute()
-        )
-        return pd.DataFrame(res.data or [])
-    except Exception:
-        cols_fallback = "task_id, project_id, title, tipo_atividade, start_date, end_date, date_confidence, status, assignee_names"
-        res = (
-            sb.table("v_portfolio_tasks")
-            .select(cols_fallback)
-            .eq("project_id", project_id)
-            .order("start_date")
-            .execute()
-        )
-        return pd.DataFrame(res.data or [])
+    res = (
+        sb.table("v_portfolio_tasks")
+        .select(cols_try)
+        .eq("project_id", project_id)
+        .order("start_date")
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
 
 
 def refresh_tasks_cache():
@@ -291,32 +286,29 @@ df_tasks = load_tasks_for_project(k, project_id)
 if df_tasks.empty:
     st.info("Sem tarefas nesse projeto.")
     st.stop()
-st.write("DEBUG sample:", df_tasks.head(3).to_dict(orient="records"))
 
-df_tasks = df_tasks.copy()
-df_tasks.rename(columns={"task_id": "ID"}, inplace=True)
+# garante colunas
+for col, default in [
+    ("assignee_names", PLACEHOLDER_PERSON_NAME),
+    ("notes", ""),
+]:
+    if col not in df_tasks.columns:
+        df_tasks[col] = default
 
-if "assignee_names" not in df_tasks.columns:
-    df_tasks["assignee_names"] = PLACEHOLDER_PERSON_NAME
-if "notes" not in df_tasks.columns:
-    df_tasks["notes"] = ""
-
+# monta DF por LISTAS (sem alinhamento por índice)
+ids = safe_text_list(df_tasks["task_id"])
 df_show = pd.DataFrame(
     {
-        "Excluir?": False,
-        "Tarefa": safe_text_series(df_tasks.get("title", pd.Series([], dtype=object))),
-        "Tipo": safe_text_series(df_tasks.get("tipo_atividade", pd.Series([], dtype=object))),
-        "Responsável(is)": safe_text_series(df_tasks.get("assignee_names", pd.Series([], dtype=object))).replace(
-            {"": PLACEHOLDER_PERSON_NAME}
-        ),
-        "Início": df_tasks["start_date"].apply(to_date) if "start_date" in df_tasks.columns else None,
-        "Fim": df_tasks["end_date"].apply(to_date) if "end_date" in df_tasks.columns else None,
-        "Status da data": safe_text_series(df_tasks.get("date_confidence", pd.Series([], dtype=object))).replace(
-            {"": "PLANEJADO"}
-        ),
-        "Obs": safe_text_series(df_tasks.get("notes", pd.Series([], dtype=object))),
+        "Excluir?": [False] * len(df_tasks),
+        "Tarefa": safe_text_list(df_tasks["title"]),
+        "Tipo": safe_text_list(df_tasks["tipo_atividade"]),
+        "Responsável(is)": [x or PLACEHOLDER_PERSON_NAME for x in safe_text_list(df_tasks["assignee_names"])],
+        "Início": [to_date(x) for x in df_tasks["start_date"].tolist()],
+        "Fim": [to_date(x) for x in df_tasks["end_date"].tolist()],
+        "Status da data": [x or "PLANEJADO" for x in safe_text_list(df_tasks["date_confidence"])],
+        "Obs": safe_text_list(df_tasks["notes"]),
     },
-    index=safe_text_series(df_tasks["ID"]).replace({"": "SEM_ID"}) if "ID" in df_tasks.columns else None,
+    index=ids,
 )
 
 edited = st.data_editor(
@@ -337,7 +329,6 @@ edited = st.data_editor(
 )
 
 to_delete_ids = edited.index[edited["Excluir?"] == True].astype(str).tolist()  # noqa: E712
-to_delete_ids = [x for x in to_delete_ids if x and x != "SEM_ID"]
 
 if to_delete_ids:
     with st.container(border=True):

@@ -1,7 +1,6 @@
 # app/pages/2_Projetos.py
 
 from datetime import date
-
 import pandas as pd
 import streamlit as st
 
@@ -25,6 +24,9 @@ except Exception:
             st.caption(f"Logado como: {user_email}")
 
 
+# ==========================================================
+# Boot (ordem obrigatória)
+# ==========================================================
 st.set_page_config(page_title="Projetos", layout="wide")
 apply_brand()
 apply_app_chrome()
@@ -68,8 +70,16 @@ def norm(x) -> str:
     return ("" if x is None else str(x)).strip()
 
 
-def safe_text_series(s: pd.Series) -> pd.Series:
-    return s.fillna("").astype(str).replace({"None": "", "nan": "", "NaT": ""})
+def safe_text_list(series: pd.Series, default: str = "") -> list[str]:
+    # converte para lista de strings sem virar "None"
+    out: list[str] = []
+    for v in series.tolist():
+        if v is None or (isinstance(v, float) and pd.isna(v)):
+            out.append(default)
+        else:
+            s = str(v).strip()
+            out.append("" if s in ("None", "nan", "NaT") else s)
+    return out
 
 
 @st.cache_data(ttl=30)
@@ -93,6 +103,9 @@ def upsert_project(project_id: str | None, payload: dict):
     return sb.table("projects").insert(payload).execute()
 
 
+# ==========================================================
+# Criar projeto
+# ==========================================================
 st.subheader("Criar projeto")
 
 with st.container(border=True):
@@ -138,6 +151,9 @@ with st.container(border=True):
                 st.code(_api_error_message(e))
 
 
+# ==========================================================
+# Lista + edição inline (ID oculto via index)
+# ==========================================================
 st.divider()
 st.subheader("Lista de Projetos (edite direto aqui)")
 st.caption("✅ Edite na tabela e clique em **Salvar alterações**.")
@@ -146,19 +162,20 @@ df = fetch_projects()
 if df.empty:
     st.info("Nenhum projeto cadastrado.")
     st.stop()
-st.write("DEBUG sample:", df.head(3).to_dict(orient="records"))
 
+# monta DF por LISTAS (sem alinhamento por índice)
+ids = safe_text_list(df["id"])
 df_show = pd.DataFrame(
     {
-        "Código": safe_text_series(df.get("project_code", pd.Series([], dtype=object))),
-        "Nome": safe_text_series(df.get("name", pd.Series([], dtype=object))),
-        "Cliente": safe_text_series(df.get("client", pd.Series([], dtype=object))),
-        "Status": safe_text_series(df.get("status", pd.Series([], dtype=object))).replace({"": "ATIVO"}),
-        "Início": df["start_date"].apply(to_date) if "start_date" in df.columns else None,
-        "Fim previsto": df["end_date_planned"].apply(to_date) if "end_date_planned" in df.columns else None,
-        "Obs": safe_text_series(df.get("notes", pd.Series([], dtype=object))),
+        "Código": safe_text_list(df["project_code"]),
+        "Nome": safe_text_list(df["name"]),
+        "Cliente": safe_text_list(df["client"]),
+        "Status": [s if s in STATUS_OPTIONS else "ATIVO" for s in safe_text_list(df["status"], "ATIVO")],
+        "Início": [to_date(x) for x in df["start_date"].tolist()],
+        "Fim previsto": [to_date(x) for x in df["end_date_planned"].tolist()],
+        "Obs": safe_text_list(df["notes"]),
     },
-    index=safe_text_series(df["id"]).replace({"": "SEM_ID"}) if "id" in df.columns else None,
+    index=ids,
 )
 
 edited = st.data_editor(
@@ -191,14 +208,10 @@ if save_inline:
         after = edited.copy()
 
         compare_cols = ["Código", "Nome", "Cliente", "Status", "Início", "Fim previsto", "Obs"]
-
         n_updates = 0
         warnings: list[str] = []
 
         for project_id, ra in after.iterrows():
-            if project_id == "SEM_ID":
-                continue
-
             rb = before.loc[project_id]
 
             changed = False
@@ -238,6 +251,7 @@ if save_inline:
     except Exception as e:
         st.error("Erro ao salvar alterações:")
         st.code(_api_error_message(e))
+
 
 
 
