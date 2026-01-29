@@ -13,6 +13,7 @@ from services.supabase_client import get_authed_client
 try:
     from ui.brand import apply_brand, apply_app_chrome, page_header
 except Exception:
+
     def apply_brand():  # type: ignore
         return
 
@@ -34,11 +35,11 @@ TIPO_OPTIONS = ["CAMPO", "RELATORIO", "ADMINISTRATIVO"]
 DATE_CONFIDENCE_OPTIONS = ["PLANEJADO", "CONFIRMADO", "CANCELADO"]
 
 STATUS_DEFAULT = "PLANEJADA"  # coluna status ainda existe
-PLACEHOLDER_PERSON_NAME = "Profissional"  # você padronizou para "Profissional"
+PLACEHOLDER_PERSON_NAME = "Profissional"  # placeholder único padronizado
 
 
 # ==========================================================
-# Boot
+# Boot (ordem obrigatória)
 # ==========================================================
 st.set_page_config(page_title="Tarefas", layout="wide")
 apply_brand()
@@ -70,6 +71,7 @@ def _api_error_message(e: Exception) -> str:
     except Exception:
         return "Erro desconhecido."
 
+
 def to_date(x):
     if pd.isna(x) or x is None:
         return None
@@ -78,33 +80,36 @@ def to_date(x):
     except Exception:
         return None
 
+
 def split_assignees(text: str) -> list[str]:
     """
     Aceita:
       'Ana + Felipe'
       'Ana, Felipe'
       'Ana;Felipe'
-    Retorna lista limpa.
+    Retorna lista limpa (preserva ordem).
     """
     if not text:
         return []
     parts = re.split(r"[+,;]", str(text))
-    names = []
+    names: list[str] = []
     for p in parts:
         n = p.strip()
         if n:
             names.append(n)
     return names
 
-def delete_task(task_id: str):
+
+def delete_task(task_id: str) -> None:
     # remove relacionamentos antes
     sb.table("task_people").delete().eq("task_id", task_id).execute()
     sb.table("tasks").delete().eq("id", task_id).execute()
 
-def set_task_people(task_id: str, person_ids: list[str]):
+
+def set_task_people(task_id: str, person_ids: list[str]) -> None:
     """
     Regrava task_people.
-    Lead obrigatório: o 1º da lista vira is_lead=true
+    Lead obrigatório: o 1º da lista vira is_lead=true.
     Também mantém tasks.assignee_id = 1º.
     """
     sb.table("task_people").delete().eq("task_id", task_id).execute()
@@ -112,38 +117,59 @@ def set_task_people(task_id: str, person_ids: list[str]):
     if not person_ids:
         return
 
-    inserts = []
-    for i, pid in enumerate(person_ids):
-        inserts.append({"task_id": task_id, "person_id": pid, "is_lead": True if i == 0 else False})
+    inserts = [{"task_id": task_id, "person_id": pid, "is_lead": (i == 0)} for i, pid in enumerate(person_ids)]
     sb.table("task_people").insert(inserts).execute()
-
     sb.table("tasks").update({"assignee_id": person_ids[0]}).eq("id", task_id).execute()
 
 
+def normalize_str(x) -> str:
+    return ("" if x is None else str(x)).strip()
+
+
 # ==========================================================
-# Loads
+# Loads (cache por usuário/sessão)
 # ==========================================================
+def _cache_key() -> str:
+    # garante que cache não "vaza" entre sessões
+    return str(st.session_state.get("access_token") or "no-token")
+
+
 @st.cache_data(ttl=30)
-def load_projects():
+def load_projects(_k: str):
     res = sb.table("projects").select("id, project_code, name").order("project_code").execute()
     df = pd.DataFrame(res.data or [])
     if df.empty:
         return df
-    df["label"] = (df["project_code"].fillna("").astype(str) + " — " + df["name"].fillna("").astype(str)).str.strip(" —")
+    df["label"] = (df["project_code"].fillna("").astype(str) + " — " + df["name"].fillna("").astype(str)).str.strip(
+        " —"
+    )
     return df
 
+
 @st.cache_data(ttl=30)
-def load_people():
-    res = sb.table("people").select("id, name").order("name").execute()
-    df = pd.DataFrame(res.data or [])
+def load_people(_k: str):
+    # Ideal: filtrar active=true; mas mantendo compatibilidade caso não exista na view/select
+    try:
+        res = sb.table("people").select("id, name, active").order("name").execute()
+        rows = res.data or []
+        df = pd.DataFrame(rows)
+        if not df.empty and "active" in df.columns:
+            df = df[df["active"] == True]  # noqa: E712
+    except Exception:
+        res = sb.table("people").select("id, name").order("name").execute()
+        df = pd.DataFrame(res.data or [])
+
     if df.empty:
         return df, {}, {}
+
+    # mapeamento exato por nome (respeita sua regra: não criar placeholder / não inventar)
     name_to_id = dict(zip(df["name"], df["id"]))
     id_to_name = dict(zip(df["id"], df["name"]))
     return df, name_to_id, id_to_name
 
+
 @st.cache_data(ttl=30)
-def load_tasks_for_project(project_id: str):
+def load_tasks_for_project(_k: str, project_id: str):
     # tenta ler notes também; se view não tiver, a UI segue sem notes
     cols_try = "task_id, project_id, title, tipo_atividade, start_date, end_date, date_confidence, status, assignee_names, notes"
     try:
@@ -166,20 +192,24 @@ def load_tasks_for_project(project_id: str):
         )
         return pd.DataFrame(res.data or [])
 
-def refresh_tasks_cache():
-    load_tasks_for_project.clear()
-
-def refresh_people_cache():
-    load_people.clear()
 
 def refresh_projects_cache():
     load_projects.clear()
 
 
+def refresh_people_cache():
+    load_people.clear()
+
+
+def refresh_tasks_cache():
+    load_tasks_for_project.clear()
+
+
 # ==========================================================
 # Projeto
 # ==========================================================
-df_projects = load_projects()
+k = _cache_key()
+df_projects = load_projects(k)
 if df_projects.empty:
     st.warning("Nenhum projeto encontrado. Crie um projeto antes.")
     st.stop()
@@ -191,7 +221,7 @@ project_id = df_projects.loc[df_projects["label"] == selected_label, "id"].iloc[
 # ==========================================================
 # People + placeholder
 # ==========================================================
-df_people, people_map, id_to_name = load_people()
+df_people, people_map, _id_to_name = load_people(k)
 if df_people.empty:
     st.warning("Tabela people está vazia.")
     st.stop()
@@ -251,8 +281,8 @@ with st.container(border=True):
                 if not names:
                     names = [PLACEHOLDER_PERSON_NAME]
 
-                person_ids = []
-                unknown = []
+                person_ids: list[str] = []
+                unknown: list[str] = []
                 for n in names:
                     pid = people_map.get(n)
                     if pid:
@@ -260,7 +290,6 @@ with st.container(border=True):
                     else:
                         unknown.append(n)
 
-                # se tiver nome não cadastrado, aborta e explica
                 if unknown:
                     st.error(
                         "Alguns responsáveis não existem na tabela people:\n"
@@ -304,7 +333,7 @@ st.divider()
 st.subheader("Lista de tarefas (edite direto aqui)")
 
 try:
-    df_tasks = load_tasks_for_project(project_id)
+    df_tasks = load_tasks_for_project(k, project_id)
 except Exception as e:
     st.error("Erro ao carregar tarefas (view v_portfolio_tasks).")
     st.code(_api_error_message(e))
@@ -332,8 +361,8 @@ df_show = pd.DataFrame(
         "Fim": df_tasks["end_date"].apply(to_date),
         "Status da data": df_tasks["date_confidence"].fillna("PLANEJADO").astype(str),
         "Obs": df_tasks["notes"].fillna("").astype(str),
-        "🗑 Excluir": False,
         "ID": df_tasks["ID"].astype(str),
+        "🗑 Excluir": False,
     }
 )
 
@@ -377,62 +406,83 @@ if save_inline:
         to_delete = after[after["🗑 Excluir"] == True]  # noqa: E712
         deleted_count = 0
         for _, row in to_delete.iterrows():
-            task_id = str(row["ID"]).strip()
-            delete_task(task_id)
-            deleted_count += 1
+            task_id = normalize_str(row["ID"])
+            if task_id:
+                delete_task(task_id)
+                deleted_count += 1
 
         # remove as deletadas da comparação de updates
         after_updates = after[after["🗑 Excluir"] != True].copy()  # noqa: E712
         before_updates = before.loc[after_updates.index].copy()
 
-        # 2) Updates
-        changed = after_updates.ne(before_updates)
-        rows_changed = changed.any(axis=1)
-
+        # 2) Updates (comparação robusta por colunas relevantes)
+        compare_cols = ["Tarefa", "Tipo", "Responsável(is)", "Início", "Fim", "Status da data", "Obs"]
         n_updates = 0
-        for idx in after_updates.index[rows_changed]:
+        warnings: list[str] = []
+
+        for idx in after_updates.index:
             row_b = before_updates.loc[idx]
             row_a = after_updates.loc[idx]
 
-            task_id = str(row_a["ID"]).strip()
+            # detecta mudança somente nessas colunas
+            changed = False
+            for c in compare_cols:
+                vb = row_b[c]
+                va = row_a[c]
+                if isinstance(vb, (date,)) and isinstance(va, (date,)):
+                    if vb != va:
+                        changed = True
+                        break
+                else:
+                    if normalize_str(vb) != normalize_str(va):
+                        changed = True
+                        break
+
+            if not changed:
+                continue
+
+            task_id = normalize_str(row_a["ID"])
+            if not task_id:
+                continue
 
             # valida datas
             start_v = row_a["Início"]
             end_v = row_a["Fim"]
             if start_v and end_v and end_v < start_v:
-                st.warning(f"Linha {idx+1}: 'Fim' menor que 'Início' (ignorado).")
+                warnings.append(f"Linha {idx+1}: 'Fim' menor que 'Início' (update ignorado).")
                 continue
 
             # responsáveis -> ids
-            names = split_assignees(str(row_a["Responsável(is)"]))
+            names = split_assignees(normalize_str(row_a["Responsável(is)"]))
             if not names:
                 names = [PLACEHOLDER_PERSON_NAME]
 
-            person_ids = []
-            unknown = []
+            person_ids: list[str] | None
+            unknown: list[str] = []
+            resolved_ids: list[str] = []
             for n in names:
                 pid = people_map.get(n)
                 if pid:
-                    person_ids.append(pid)
+                    resolved_ids.append(pid)
                 else:
                     unknown.append(n)
 
             if unknown:
-                st.warning(
-                    f"Linha {idx+1}: responsáveis não cadastrados (ignorado update de responsáveis): "
-                    + ", ".join(unknown)
+                # regra: não salva responsáveis dessa linha, mas salva o resto
+                warnings.append(
+                    f"Linha {idx+1}: responsáveis não cadastrados (responsáveis NÃO foram salvos): {', '.join(unknown)}"
                 )
-                person_ids = None  # não atualiza responsáveis
-            elif not person_ids:
-                person_ids = [placeholder_id]
+                person_ids = None
+            else:
+                person_ids = resolved_ids if resolved_ids else [placeholder_id]
 
             update_payload = {
-                "title": str(row_a["Tarefa"]).strip(),
-                "tipo_atividade": str(row_a["Tipo"]).strip(),
+                "title": normalize_str(row_a["Tarefa"]) or "Sem título",
+                "tipo_atividade": normalize_str(row_a["Tipo"]) or TIPO_OPTIONS[0],
                 "start_date": start_v.isoformat() if start_v else None,
                 "end_date": end_v.isoformat() if end_v else None,
-                "date_confidence": str(row_a["Status da data"]).strip(),
-                "notes": str(row_a["Obs"]).strip() or None,
+                "date_confidence": normalize_str(row_a["Status da data"]) or DATE_CONFIDENCE_OPTIONS[0],
+                "notes": normalize_str(row_a["Obs"]) or None,
             }
 
             sb.table("tasks").update(update_payload).eq("id", task_id).execute()
@@ -442,6 +492,9 @@ if save_inline:
                 set_task_people(task_id, person_ids)
 
             n_updates += 1
+
+        if warnings:
+            st.warning("\n".join(warnings))
 
         msg = []
         if deleted_count:
@@ -455,3 +508,4 @@ if save_inline:
     except Exception as e:
         st.error("Erro ao salvar alterações:")
         st.code(_api_error_message(e))
+
