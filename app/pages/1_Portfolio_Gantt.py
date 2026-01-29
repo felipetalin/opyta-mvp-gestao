@@ -144,9 +144,6 @@ def iso_or_none(d):
 
 
 def parse_date_any(x, fallback):
-    """
-    Aceita date / datetime / ISO string e devolve date.
-    """
     if x is None:
         return fallback
     if isinstance(x, date) and not isinstance(x, datetime):
@@ -166,7 +163,7 @@ def parse_date_any(x, fallback):
 
 
 # ==========================================================
-# Session defaults (presets)
+# Session defaults
 # ==========================================================
 today = date.today()
 d0, d1 = month_range(today)
@@ -181,6 +178,9 @@ _ss_setdefault("pf_manual_start", d0)
 _ss_setdefault("pf_manual_end", d1)
 _ss_setdefault("pf_show_status", False)
 _ss_setdefault("pf_show_cancelled", True)
+
+# payload pendente (para aplicar ANTES dos widgets)
+_ss_setdefault("pf_pending_preset_payload", None)
 
 
 # ==========================================================
@@ -222,6 +222,39 @@ def save_preset(name, payload):
 
 def delete_preset(name):
     sb.table("user_filter_presets").delete().eq("name", name).execute()
+
+
+# ==========================================================
+# APLICA PRESET PENDENTE (antes de desenhar widgets)
+# ==========================================================
+if st.session_state.get("pf_pending_preset_payload"):
+    payload = st.session_state["pf_pending_preset_payload"] or {}
+    st.session_state["pf_pending_preset_payload"] = None  # consome
+
+    allowed_keys = {
+        "pf_project",
+        "pf_types",
+        "pf_people",
+        "pf_period_preset",
+        "pf_manual_start",
+        "pf_manual_end",
+        "pf_show_status",
+        "pf_show_cancelled",
+    }
+
+    # aplica valores "seguros"
+    for k, v in payload.items():
+        if k not in allowed_keys:
+            continue
+        if k in ("pf_manual_start", "pf_manual_end"):
+            continue  # trata abaixo
+        st.session_state[k] = v
+
+    st.session_state["pf_manual_start"] = parse_date_any(payload.get("pf_manual_start"), st.session_state["pf_manual_start"])
+    st.session_state["pf_manual_end"] = parse_date_any(payload.get("pf_manual_end"), st.session_state["pf_manual_end"])
+
+    # garante rerun limpo já com session_state aplicado
+    st.rerun()
 
 
 PORTFOLIO_COLS = "task_id,project_id,project_code,title,tipo_atividade,start_date,end_date,status,assignee_names"
@@ -288,17 +321,9 @@ with filter_bar_start():
 
         st.text_input("Nome do preset", value="", placeholder="Ex: 2 meses + Todos + Campo", key="pf_preset_name")
 
-# carregar preset (com parse de datas)
+# carregar preset -> salva payload pendente e rerun
 if do_load and preset_sel != "—":
-    payload = preset_map.get(preset_sel) or {}
-    for k, v in payload.items():
-        if k in ("pf_manual_start", "pf_manual_end"):
-            continue
-        st.session_state[k] = v
-
-    st.session_state["pf_manual_start"] = parse_date_any(payload.get("pf_manual_start"), st.session_state["pf_manual_start"])
-    st.session_state["pf_manual_end"] = parse_date_any(payload.get("pf_manual_end"), st.session_state["pf_manual_end"])
-
+    st.session_state["pf_pending_preset_payload"] = preset_map.get(preset_sel) or {}
     st.rerun()
 
 # excluir preset
@@ -333,7 +358,7 @@ else:
     st.session_state["pf_manual_start"] = p_start
     st.session_state["pf_manual_end"] = p_end
 
-# salvar preset (datas como ISO)
+# salvar preset (datas ISO)
 if do_save:
     name = (st.session_state.get("pf_preset_name") or "").strip()
     if not name:
