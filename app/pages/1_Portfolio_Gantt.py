@@ -42,7 +42,6 @@ def month_range(d: date):
 
 
 def shift_month_first(d: date, delta: int) -> date:
-    """Retorna o primeiro dia do mês deslocado."""
     y = d.year
     m = d.month + delta
     while m > 12:
@@ -82,24 +81,15 @@ def normalize_status(x: str) -> str:
 
 
 def make_period_presets(today_: date):
-    """
-    Presets:
-      - 1 mês (mês atual)
-      - 2 meses (mês atual + próximo)
-      - 3 meses (mês atual + 2 próximos)
-      - mês anterior + atual
-      - atual + próximo
-      - manual
-    """
     cur_first = shift_month_first(today_, 0)
     prev_first = shift_month_first(today_, -1)
     next_first = shift_month_first(today_, 1)
     next2_first = shift_month_first(today_, 2)
 
     cur_start, cur_end = month_range(cur_first)
-    prev_start, prev_end = month_range(prev_first)
-    next_start, next_end = month_range(next_first)
-    next2_start, next2_end = month_range(next2_first)
+    prev_start, _ = month_range(prev_first)
+    _, next_end = month_range(next_first)
+    _, next2_end = month_range(next2_first)
 
     presets = [
         ("(manual)", None, None),
@@ -107,7 +97,6 @@ def make_period_presets(today_: date):
         (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
         (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
         (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
-        (f"Atual + próximo ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
     ]
     return presets
 
@@ -131,7 +120,6 @@ if df.empty:
 df["start_date"] = to_dt(df.get("start_date"))
 df["end_date"] = to_dt(df.get("end_date"))
 
-# Se end_date vazio, assume start_date
 df["end_date"] = df["end_date"].fillna(df["start_date"])
 df = df.dropna(subset=["start_date", "end_date"]).copy()
 if df.empty:
@@ -146,7 +134,7 @@ if "title" not in df.columns:
 if "tipo_atividade" not in df.columns:
     df["tipo_atividade"] = "CAMPO"
 
-# assignee_names (padrão novo). Se vier assignee_name antigo, converte.
+# assignee_names
 if "assignee_names" not in df.columns:
     if "assignee_name" in df.columns:
         df["assignee_names"] = df["assignee_name"].fillna("Profissional")
@@ -157,10 +145,9 @@ df["assignee_names"] = df["assignee_names"].fillna("Profissional")
 # status (pode existir ou não)
 if "status" not in df.columns:
     df["status"] = ""
-
 df["status_norm"] = df["status"].apply(normalize_status)
 
-# Label no eixo Y
+# Label eixo Y
 df["label"] = (
     df["project_code"].astype(str).fillna("").str.strip()
     + " | "
@@ -177,7 +164,7 @@ d0, d1 = month_range(today)
 projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if safe_text(p)])
 types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if safe_text(t)])
 
-# Pessoas: assignee_names vem "A + B + C"
+# Pessoas: "A + B + C"
 people_set = set()
 for s in df["assignee_names"].dropna().astype(str).tolist():
     for p in [x.strip() for x in s.split("+")]:
@@ -188,10 +175,9 @@ people_all = sorted(people_set)
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 default_people = people_all
 
-# Presets de período (inclui multi-mês)
 presets = make_period_presets(today)
 preset_labels = [p[0] for p in presets]
-default_preset_index = 1 if len(preset_labels) > 1 else 0  # "Mês atual" como default
+default_preset_index = 1 if len(preset_labels) > 1 else 0  # mês atual
 
 with filter_bar_start():
     c1, c2, c3, c4, c5, c6 = st.columns([1.2, 1.7, 2.3, 1.7, 1.0, 1.1])
@@ -243,7 +229,6 @@ if sel_types:
 else:
     f = f.iloc[0:0]
 
-# filtro por pessoas (regex seguro)
 if sel_people:
     patt = "|".join(re.escape(p.strip()) for p in sel_people if p and p.strip())
     if patt:
@@ -251,7 +236,6 @@ if sel_people:
 else:
     f = f.iloc[0:0]
 
-# Mostrar/ocultar canceladas
 if not show_cancelled:
     f = f[f["status_norm"] != "CANCELADA"]
 
@@ -275,7 +259,7 @@ order = (
     .tolist()
 )
 
-# Texto dentro da barra
+# Texto na barra
 status_icon = {
     "CONCLUIDA": "✓",
     "EM_ANDAMENTO": "…",
@@ -289,14 +273,14 @@ if show_status:
         axis=1,
     )
 else:
-    # mesmo sem toggle, cancelada recebe ícone (ajuda leitura e justifica “apagado”)
     f["bar_text"] = f.apply(
         lambda r: (("✖ " if safe_text(r.get("status_norm")) == "CANCELADA" else "") + safe_text(r.get("assignee_names"))).strip(),
         axis=1,
     )
 
-# opacidade: canceladas “apagadas”
-f["opacity"] = f["status_norm"].apply(lambda s: 0.35 if s == "CANCELADA" else 1.0)
+# >>> Estilo canceladas: cria categoria separada para cor cinza
+f["tipo_plot"] = f["tipo_atividade"].astype(str)
+f.loc[f["status_norm"] == "CANCELADA", "tipo_plot"] = "CANCELADA"
 
 
 # ==========================================================
@@ -305,7 +289,8 @@ f["opacity"] = f["status_norm"].apply(lambda s: 0.35 if s == "CANCELADA" else 1.
 color_map = {
     "CAMPO": "#1B5E20",
     "RELATORIO": "#66BB6A",
-    "ADMINISTRATIVO": "#2F6DAE",  # distinto do CAMPO
+    "ADMINISTRATIVO": "#2F6DAE",
+    "CANCELADA": "#9E9E9E",  # cinza
 }
 
 
@@ -317,7 +302,7 @@ fig = px.timeline(
     x_start="plot_start",
     x_end="plot_end",
     y="label",
-    color="tipo_atividade",
+    color="tipo_plot",
     color_discrete_map=color_map,
     text="bar_text",
     hover_data={
@@ -331,6 +316,8 @@ fig = px.timeline(
         "label": False,
         "plot_start": False,
         "plot_end": False,
+        "tipo_plot": False,
+        "status_norm": False,
     },
 )
 
@@ -341,12 +328,10 @@ fig.update_yaxes(
     autorange="reversed",
 )
 
-# Aplica opacidade por ponto (canceladas apagadas)
 fig.update_traces(
     textposition="inside",
     insidetextanchor="middle",
     cliponaxis=False,
-    opacity=f["opacity"].tolist(),
 )
 
 fig.update_xaxes(range=[p_start_dt, p_end_dt])
@@ -369,7 +354,6 @@ fig.update_xaxes(
 # Shapes: fim de semana + linha do hoje
 shapes = []
 
-# fim de semana sombreado
 for d in days:
     if d.weekday() >= 5:
         x0 = pd.to_datetime(d.date())
@@ -389,7 +373,6 @@ for d in days:
             )
         )
 
-# linha do dia atual
 today_dt = pd.to_datetime(date.today())
 if p_start_dt <= today_dt <= p_end_dt:
     shapes.append(
@@ -420,7 +403,7 @@ st.plotly_chart(fig, use_container_width=True)
 
 
 # ==========================================================
-# Export CSV do filtro (rápido)
+# Export CSV do filtro
 # ==========================================================
 export_cols = [
     c for c in [
