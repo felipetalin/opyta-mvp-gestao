@@ -277,15 +277,12 @@ with st.container(border=True):
 
 
 # ==========================================================
-# Lista (UX refinada: ID escondido via index)
+# Lista (A2: exclusão explícita, impossível errar)
 # ==========================================================
 st.divider()
 st.subheader("Lista de tarefas (edite direto aqui)")
 
-st.info(
-    "✅ **Editar**: altere os campos direto na tabela e clique em **Salvar alterações**.\n\n"
-    "🗑 **Excluir**: marque a coluna 🗑, confirme a exclusão e clique em **Salvar alterações**."
-)
+st.caption("✅ Edite na tabela e clique em **Salvar alterações**. Para excluir, use o bloco vermelho abaixo.")
 
 df_tasks = load_tasks_for_project(k, project_id)
 if df_tasks.empty:
@@ -300,10 +297,9 @@ if "assignee_names" not in df_tasks.columns:
 if "notes" not in df_tasks.columns:
     df_tasks["notes"] = ""
 
-# df_show com index = ID (escondido)
 df_show = pd.DataFrame(
     {
-        "🗑": False,
+        "Excluir?": False,
         "Tarefa": df_tasks["title"].astype(str),
         "Tipo": df_tasks["tipo_atividade"].astype(str),
         "Responsável(is)": df_tasks["assignee_names"].fillna(PLACEHOLDER_PERSON_NAME).astype(str),
@@ -318,10 +314,10 @@ df_show = pd.DataFrame(
 edited = st.data_editor(
     df_show,
     use_container_width=True,
-    hide_index=True,  # ✅ some com o ID
+    hide_index=True,
     num_rows="fixed",
     column_config={
-        "🗑": st.column_config.CheckboxColumn("🗑", width="small", help="Marque para excluir."),
+        "Excluir?": st.column_config.CheckboxColumn("Excluir?", width="small", help="Marque para excluir."),
         "Tarefa": st.column_config.TextColumn(width="large"),
         "Tipo": st.column_config.SelectboxColumn(options=TIPO_OPTIONS, width="medium"),
         "Responsável(is)": st.column_config.TextColumn(width="large", help="Use ' + ' para múltiplos."),
@@ -332,12 +328,35 @@ edited = st.data_editor(
     },
 )
 
-to_delete_count = int((edited["🗑"] == True).sum())  # noqa: E712
-confirm_delete = False
-if to_delete_count > 0:
-    st.warning(f"Você marcou **{to_delete_count}** tarefa(s) para exclusão.")
-    confirm_delete = st.checkbox("Confirmo a exclusão definitiva das tarefas marcadas", value=False)
+# ---------- bloco explícito de exclusão ----------
+to_delete_ids = edited.index[edited["Excluir?"] == True].astype(str).tolist()  # noqa: E712
+if to_delete_ids:
+    with st.container(border=True):
+        st.error(f"🗑 Exclusão: você marcou **{len(to_delete_ids)}** tarefa(s).")
+        titles = edited.loc[to_delete_ids, "Tarefa"].astype(str).tolist()
+        st.write("**Tarefas marcadas:**")
+        st.write("\n".join([f"- {t}" for t in titles]))
 
+        confirm_delete = st.checkbox("Confirmo a exclusão definitiva das tarefas marcadas", value=False)
+
+        colx1, colx2 = st.columns([1, 2])
+        delete_now = colx1.button("Excluir marcadas agora", type="primary", disabled=not confirm_delete)
+        colx2.caption("Dica: desmarque o checkbox na tabela para cancelar a exclusão.")
+
+        if delete_now:
+            try:
+                for tid in to_delete_ids:
+                    rpc_delete_task(tid)
+                st.success(f"Excluídas: {len(to_delete_ids)}")
+                refresh_tasks_cache()
+                st.rerun()
+            except Exception as e:
+                st.error("Erro ao excluir:")
+                st.code(_api_error_message(e))
+
+st.divider()
+
+# ---------- salvar apenas edições (sem excluir) ----------
 cbtn1, cbtn2 = st.columns([1, 1])
 save_inline = cbtn1.button("Salvar alterações", type="primary")
 reload_inline = cbtn2.button("Recarregar")
@@ -351,20 +370,8 @@ if save_inline:
         before = df_show.copy()
         after = edited.copy()
 
-        deleted_count = 0
-        if to_delete_count > 0 and not confirm_delete:
-            st.error("Para excluir, marque também a confirmação de exclusão definitiva.")
-            st.stop()
-
-        # DELETE via RPC (transação)
-        if to_delete_count > 0 and confirm_delete:
-            to_delete = after[after["🗑"] == True]  # noqa: E712
-            for task_id in to_delete.index.astype(str).tolist():
-                rpc_delete_task(task_id)
-                deleted_count += 1
-
-        # updates (somente não deletadas)
-        after_updates = after[after["🗑"] != True].copy()  # noqa: E712
+        # salva apenas NÃO marcadas pra excluir
+        after_updates = after[after["Excluir?"] != True].copy()  # noqa: E712
         before_updates = before.loc[after_updates.index].copy()
 
         compare_cols = ["Tarefa", "Tipo", "Responsável(is)", "Início", "Fim", "Status da data", "Obs"]
@@ -427,12 +434,7 @@ if save_inline:
         if warnings:
             st.warning("\n".join(warnings))
 
-        msg = []
-        if deleted_count:
-            msg.append(f"Excluídas: {deleted_count}")
-        msg.append(f"Atualizadas: {n_updates}")
-        st.success(" | ".join(msg))
-
+        st.success(f"Atualizadas: {n_updates}")
         refresh_tasks_cache()
         st.rerun()
 
