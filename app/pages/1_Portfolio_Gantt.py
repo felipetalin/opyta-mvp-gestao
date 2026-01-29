@@ -1,7 +1,7 @@
 # app/pages/1_Portfolio_Gantt.py
 
 import re
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -89,24 +89,6 @@ def split_people(assignee_names):
     return out
 
 
-def _api_error_message(e: Exception) -> str:
-    try:
-        if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
-            d = e.args[0]
-            msg = d.get("message") or str(d)
-            details = d.get("details")
-            hint = d.get("hint")
-            out = msg
-            if hint:
-                out += f"\nHint: {hint}"
-            if details:
-                out += f"\nDetalhes: {details}"
-            return out
-        return str(e)
-    except Exception:
-        return "Erro desconhecido."
-
-
 # ==========================================================
 # Load (view)
 # ==========================================================
@@ -149,11 +131,25 @@ if "assignee_names" not in df.columns:
         df["assignee_names"] = "Profissional"
 df["assignee_names"] = df["assignee_names"].fillna("Profissional")
 
-# status (pode existir ou não)
+# ------------------------------
+# STATUS: regra final (anti-bug)
+# 1) Preferir date_confidence (Status da data)
+# 2) Se não existir, usar status
+# ------------------------------
+if "date_confidence" not in df.columns:
+    df["date_confidence"] = ""
+
 if "status" not in df.columns:
     df["status"] = ""
+
+df["date_confidence"] = df["date_confidence"].fillna("")
 df["status"] = df["status"].fillna("")
-df["status_norm"] = df["status"].apply(normalize_status)
+
+# Este é o status que o Gantt vai usar/mostrar
+df["status_display"] = df["date_confidence"]
+df.loc[df["status_display"].astype(str).str.strip().eq(""), "status_display"] = df["status"]
+
+df["status_norm"] = df["status_display"].apply(normalize_status)
 
 # Label no eixo Y
 df["label"] = (
@@ -181,7 +177,7 @@ people_all = sorted(people_set)
 
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 
-# Atalhos de período
+# Atalhos de período (inclui 2/3 meses e mês anterior+atual)
 cur_first = shift_month_first(today, 0)
 prev_first = shift_month_first(today, -1)
 next_first = shift_month_first(today, 1)
@@ -202,23 +198,6 @@ period_presets = [
 period_labels = [p[0] for p in period_presets]
 default_period_idx = 1 if len(period_labels) > 1 else 0
 
-# ---------- NOVO: Navegar por mês (lista baseada no dataset) ----------
-# Intervalo mensal entre min(start/end) e max(start/end) da view
-min_dt = pd.to_datetime(min(df["start_date"].min(), df["end_date"].min()))
-max_dt = pd.to_datetime(max(df["start_date"].max(), df["end_date"].max()))
-min_month = date(min_dt.year, min_dt.month, 1)
-max_month = date(max_dt.year, max_dt.month, 1)
-
-month_starts = pd.date_range(min_month, max_month, freq="MS")
-month_nav = [(month_label(d.date()), d.date()) for d in month_starts]
-
-# fallback: se por algum motivo vier vazio
-if not month_nav:
-    month_nav = [(month_label(today), date(today.year, today.month, 1))]
-
-month_nav_labels = [x[0] for x in month_nav]
-default_month_nav_idx = month_nav_labels.index(month_label(today)) if month_label(today) in month_nav_labels else 0
-
 with filter_bar_start():
     c1, c2, c3, c4, c5 = st.columns([1.2, 1.7, 2.2, 1.6, 1.3])
 
@@ -234,37 +213,17 @@ with filter_bar_start():
     with c4:
         sel_period = st.selectbox("Atalho (período)", period_labels, index=default_period_idx)
 
-        # NOVO: aparece só quando manual
-        sel_month_nav = None
-        if sel_period == "(manual)":
-            sel_month_nav = st.selectbox(
-                "Mês (rápido)",
-                month_nav_labels,
-                index=default_month_nav_idx,
-                help="Escolha um mês específico sem precisar mexer em datas.",
-            )
-
     with c5:
         show_status = st.toggle("Status na barra", value=False)
         show_cancelled = st.toggle("Mostrar canceladas", value=True)
 
-# Período final (preset, manual por mês, ou date_input)
+# Período final (preset ou manual)
 chosen = [p for p in period_presets if p[0] == sel_period][0]
-
 if chosen[0] != "(manual)":
     p_start, p_end = chosen[1], chosen[2]
     st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 else:
-    # Se escolheu "Mês (rápido)", ele define o mês
-    if sel_month_nav:
-        month_first = [m[1] for m in month_nav if m[0] == sel_month_nav][0]
-        p_start, p_end = month_range(month_first)
-        st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
-    else:
-        p_start, p_end = d0, d1
-
-    # Mantém o date_input manual como opção (refino fino)
-    period = st.date_input("Período (manual)", value=(p_start, p_end), format="DD/MM/YYYY")
+    period = st.date_input("Período (manual)", value=(d0, d1), format="DD/MM/YYYY")
     if isinstance(period, tuple) and len(period) == 2:
         p_start, p_end = period
     else:
@@ -324,22 +283,18 @@ status_icon = {
     "CONCLUIDA": "✓",
     "EM_ANDAMENTO": "…",
     "AGUARDANDO_CONFIRMACAO": "⏳",
+    "CONFIRMADO": "✓",
+    "PLANEJADO": "",
     "PLANEJADA": "",
     "CANCELADA": "✖",
 }
 if show_status:
     f["bar_text"] = f.apply(
-        lambda r: (
-            (status_icon.get(safe_text(r.get("status_norm")), "") + " " + safe_text(r.get("assignee_names"))).strip()
-        ),
+        lambda r: (safe_text(r.get("status_norm")) + " - " + safe_text(r.get("assignee_names"))).strip(" -"),
         axis=1,
     )
 else:
-    # só um hint leve para canceladas
-    f["bar_text"] = f.apply(
-        lambda r: (("✖ " if safe_text(r.get("status_norm")) == "CANCELADA" else "") + safe_text(r.get("assignee_names"))).strip(),
-        axis=1,
-    )
+    f["bar_text"] = f["assignee_names"].astype(str)
 
 # Cor: admin diferente + cancelada cinza (se estiver visível)
 f["tipo_plot"] = f["tipo_atividade"].astype(str)
@@ -369,7 +324,9 @@ fig = px.timeline(
         "title": True,
         "assignee_names": True,
         "tipo_atividade": True,
+        "date_confidence": True,
         "status": True,
+        "status_display": True,
         "start_date": True,
         "end_date": True,
         "label": False,
