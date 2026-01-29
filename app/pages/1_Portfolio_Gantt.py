@@ -1,7 +1,7 @@
 # app/pages/1_Portfolio_Gantt.py
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -131,6 +131,40 @@ def _ss_setdefault(k, v):
         st.session_state[k] = v
 
 
+def iso_or_none(d):
+    if not d:
+        return None
+    if isinstance(d, str):
+        return d
+    if isinstance(d, datetime):
+        return d.date().isoformat()
+    if isinstance(d, date):
+        return d.isoformat()
+    return str(d)
+
+
+def parse_date_any(x, fallback):
+    """
+    Aceita date / datetime / ISO string e devolve date.
+    """
+    if x is None:
+        return fallback
+    if isinstance(x, date) and not isinstance(x, datetime):
+        return x
+    if isinstance(x, datetime):
+        return x.date()
+    if isinstance(x, str) and x.strip():
+        try:
+            return datetime.fromisoformat(x.strip()).date()
+        except Exception:
+            pass
+        try:
+            return pd.to_datetime(x, errors="coerce").date()
+        except Exception:
+            pass
+    return fallback
+
+
 # ==========================================================
 # Session defaults (presets)
 # ==========================================================
@@ -180,7 +214,6 @@ def load_presets():
 
 
 def save_preset(name, payload):
-    # upsert pelo unique(owner_id, name)
     sb.table("user_filter_presets").upsert(
         {"name": name, "payload": payload},
         on_conflict="owner_id,name",
@@ -201,7 +234,6 @@ def fetch_portfolio(project_code, p_start_iso, p_end_iso, tipo_list, show_cancel
     if project_code and project_code != "Todos":
         q = q.eq("project_code", project_code)
 
-    # overlap: start_date <= p_end AND end_date >= p_start
     q = q.lte("start_date", p_end_iso).gte("end_date", p_start_iso)
 
     if tipo_list:
@@ -230,10 +262,8 @@ with filter_bar_start():
 
     with top1:
         c_p, c_t = st.columns([1.1, 1.6])
-
         with c_p:
             st.selectbox("Projeto", project_options, key="pf_project")
-
         with c_t:
             st.multiselect("Tipo Atividade", types_all, key="pf_types")
 
@@ -258,11 +288,17 @@ with filter_bar_start():
 
         st.text_input("Nome do preset", value="", placeholder="Ex: 2 meses + Todos + Campo", key="pf_preset_name")
 
-# carregar preset
+# carregar preset (com parse de datas)
 if do_load and preset_sel != "—":
     payload = preset_map.get(preset_sel) or {}
     for k, v in payload.items():
+        if k in ("pf_manual_start", "pf_manual_end"):
+            continue
         st.session_state[k] = v
+
+    st.session_state["pf_manual_start"] = parse_date_any(payload.get("pf_manual_start"), st.session_state["pf_manual_start"])
+    st.session_state["pf_manual_end"] = parse_date_any(payload.get("pf_manual_end"), st.session_state["pf_manual_end"])
+
     st.rerun()
 
 # excluir preset
@@ -297,7 +333,7 @@ else:
     st.session_state["pf_manual_start"] = p_start
     st.session_state["pf_manual_end"] = p_end
 
-# salvar preset
+# salvar preset (datas como ISO)
 if do_save:
     name = (st.session_state.get("pf_preset_name") or "").strip()
     if not name:
@@ -308,10 +344,10 @@ if do_save:
             "pf_types": st.session_state["pf_types"],
             "pf_people": st.session_state["pf_people"],
             "pf_period_preset": st.session_state["pf_period_preset"],
-            "pf_manual_start": st.session_state["pf_manual_start"],
-            "pf_manual_end": st.session_state["pf_manual_end"],
-            "pf_show_status": st.session_state["pf_show_status"],
-            "pf_show_cancelled": st.session_state["pf_show_cancelled"],
+            "pf_manual_start": iso_or_none(st.session_state["pf_manual_start"]),
+            "pf_manual_end": iso_or_none(st.session_state["pf_manual_end"]),
+            "pf_show_status": bool(st.session_state["pf_show_status"]),
+            "pf_show_cancelled": bool(st.session_state["pf_show_cancelled"]),
         }
         try:
             save_preset(name, payload)
@@ -346,7 +382,6 @@ if df.empty:
     st.info("Ainda não há tarefas no portfólio (ou os filtros zeraram a lista).")
     st.stop()
 
-# normalização defensiva
 df["start_date"] = to_dt(df.get("start_date"))
 df["end_date"] = to_dt(df.get("end_date"))
 df["end_date"] = df["end_date"].fillna(df["start_date"])
@@ -374,7 +409,6 @@ df["label"] = (
     + df["title"].astype(str).fillna("").str.strip()
 ).str.strip(" |")
 
-# pessoas possíveis (dado já filtrado)
 people_set = set()
 for s in df["assignee_names"].astype(str).tolist():
     for p in split_people(s):
@@ -400,11 +434,9 @@ if f.empty:
     st.info("Sem tarefas após filtro de profissionais.")
     st.stop()
 
-# clamp visual
 f["plot_start"] = f["start_date"].clip(lower=p_start_dt)
 f["plot_end"] = f["end_date"].clip(upper=p_end_dt)
 
-# ordem
 order = (
     f.groupby("label")["plot_start"]
     .min()
@@ -413,7 +445,6 @@ order = (
     .tolist()
 )
 
-# texto barra
 status_icon = {
     "CONCLUIDA": "✓",
     "EM_ANDAMENTO": "…",
@@ -432,7 +463,6 @@ else:
         axis=1,
     )
 
-# canceladas cinza
 f["tipo_plot"] = f["tipo_atividade"].astype(str)
 f.loc[f["status_norm"] == "CANCELADA", "tipo_plot"] = "CANCELADA"
 
@@ -443,9 +473,6 @@ color_map = {
     "CANCELADA": "#9E9E9E",
 }
 
-# ==========================================================
-# Gantt
-# ==========================================================
 fig = px.timeline(
     f,
     x_start="plot_start",
@@ -536,7 +563,6 @@ if p_start_dt <= today_dt <= p_end_dt:
     )
 
 fig.update_layout(shapes=shapes)
-
 fig.update_layout(
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, title_text=""),
     margin=dict(l=10, r=10, t=60, b=40),
@@ -547,26 +573,6 @@ fig.update_layout(height=max(420, 80 + row_count * 55))
 
 st.plotly_chart(fig, use_container_width=True)
 
-# Export CSV
-export_cols = ["project_code", "title", "tipo_atividade", "assignee_names", "status", "start_date", "end_date"]
-export_cols = [c for c in export_cols if c in f.columns]
-export_df = f[export_cols].copy()
-export_df["start_date"] = to_dt(export_df["start_date"]).dt.date
-export_df["end_date"] = to_dt(export_df["end_date"]).dt.date
-
-st.download_button(
-    "Baixar CSV do filtro",
-    data=export_df.to_csv(index=False).encode("utf-8"),
-    file_name="portfolio_filtrado.csv",
-    mime="text/csv",
-)
-
-with st.expander("Dados (opcional)"):
-    st.dataframe(
-        f.sort_values(["plot_start", "plot_end"], na_position="last"),
-        use_container_width=True,
-        hide_index=True,
-    )
 
 
 
