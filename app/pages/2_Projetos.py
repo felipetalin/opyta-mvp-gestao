@@ -145,11 +145,12 @@ with st.container(border=True):
 
 
 # ==========================================================
-# Lista + edição inline
+# Lista + edição inline (UX refinada: ID escondido via index)
 # ==========================================================
 st.divider()
 st.subheader("Lista de Projetos (edite direto aqui)")
-st.caption("💡 Edite na tabela e clique em **Salvar alterações**.")
+
+st.info("✅ Edite na tabela e clique em **Salvar alterações**. (O ID fica oculto)")
 
 df = fetch_projects()
 if df.empty:
@@ -167,8 +168,8 @@ df_show = pd.DataFrame(
         "Início": df["start_date"].apply(to_date),
         "Fim previsto": df["end_date_planned"].apply(to_date),
         "Obs": df["notes"].fillna("").astype(str),
-        "ID": df["id"].astype(str),
-    }
+    },
+    index=df["id"].astype(str),  # ✅ ID fica no index (oculto)
 )
 
 edited = st.data_editor(
@@ -177,14 +178,13 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="fixed",
     column_config={
-        "Código": st.column_config.TextColumn(width="medium", help="Código do projeto (editável)."),
+        "Código": st.column_config.TextColumn(width="medium"),
         "Nome": st.column_config.TextColumn(width="large"),
         "Cliente": st.column_config.TextColumn(width="medium"),
         "Status": st.column_config.SelectboxColumn(options=STATUS_OPTIONS, width="small"),
         "Início": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
         "Fim previsto": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
         "Obs": st.column_config.TextColumn(width="large"),
-        "ID": st.column_config.TextColumn(disabled=True, width="medium"),
     },
 )
 
@@ -206,34 +206,21 @@ if save_inline:
         n_updates = 0
         warnings: list[str] = []
 
-        for idx in after.index:
-            rb = before.loc[idx]
-            ra = after.loc[idx]
+        for project_id, ra in after.iterrows():
+            rb = before.loc[project_id]
 
             changed = False
             for c in compare_cols:
-                vb = rb[c]
-                va = ra[c]
-                if isinstance(vb, date) and isinstance(va, date):
-                    if vb != va:
-                        changed = True
-                        break
-                else:
-                    if norm(vb) != norm(va):
-                        changed = True
-                        break
-
+                if norm(rb[c]) != norm(ra[c]):
+                    changed = True
+                    break
             if not changed:
-                continue
-
-            project_id = norm(ra["ID"])
-            if not project_id:
                 continue
 
             code = norm(ra["Código"])
             name = norm(ra["Nome"])
             if not code or not name:
-                warnings.append(f"Linha {idx+1}: Código e Nome são obrigatórios (update ignorado).")
+                warnings.append(f"Projeto '{name or '(sem nome)'}': Código e Nome são obrigatórios (update ignorado).")
                 continue
 
             payload = {
@@ -246,7 +233,7 @@ if save_inline:
                 "notes": norm(ra["Obs"]) or None,
             }
 
-            sb.table("projects").update(payload).eq("id", project_id).execute()
+            sb.table("projects").update(payload).eq("id", str(project_id)).execute()
             n_updates += 1
 
         if warnings:

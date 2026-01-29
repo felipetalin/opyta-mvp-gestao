@@ -95,7 +95,6 @@ def split_assignees(text: str) -> list[str]:
 
 
 def rpc_delete_task(task_id: str) -> None:
-    # Usa transação no banco para não quebrar a regra do lead
     sb.rpc("rpc_delete_task", {"p_task_id": task_id}).execute()
 
 
@@ -266,7 +265,6 @@ with st.container(border=True):
             ins = sb.table("tasks").insert(payload).execute()
             new_id = ins.data[0]["id"]
 
-            # usa RPC pra não violar regra do lead
             rpc_set_task_people(new_id, person_ids)
 
             st.success("Tarefa criada com sucesso.")
@@ -279,11 +277,15 @@ with st.container(border=True):
 
 
 # ==========================================================
-# Lista
+# Lista (UX refinada: ID escondido via index)
 # ==========================================================
 st.divider()
 st.subheader("Lista de tarefas (edite direto aqui)")
-st.caption("💡 Para excluir: marque 🗑, confirme a exclusão e clique em **Salvar alterações**.")
+
+st.info(
+    "✅ **Editar**: altere os campos direto na tabela e clique em **Salvar alterações**.\n\n"
+    "🗑 **Excluir**: marque a coluna 🗑, confirme a exclusão e clique em **Salvar alterações**."
+)
 
 df_tasks = load_tasks_for_project(k, project_id)
 if df_tasks.empty:
@@ -298,6 +300,7 @@ if "assignee_names" not in df_tasks.columns:
 if "notes" not in df_tasks.columns:
     df_tasks["notes"] = ""
 
+# df_show com index = ID (escondido)
 df_show = pd.DataFrame(
     {
         "🗑": False,
@@ -308,25 +311,24 @@ df_show = pd.DataFrame(
         "Fim": df_tasks["end_date"].apply(to_date),
         "Status da data": df_tasks["date_confidence"].fillna("PLANEJADO").astype(str),
         "Obs": df_tasks["notes"].fillna("").astype(str),
-        "ID": df_tasks["ID"].astype(str),
-    }
+    },
+    index=df_tasks["ID"].astype(str),
 )
 
 edited = st.data_editor(
     df_show,
     use_container_width=True,
-    hide_index=True,
+    hide_index=True,  # ✅ some com o ID
     num_rows="fixed",
     column_config={
-        "🗑": st.column_config.CheckboxColumn("🗑", width="small"),
+        "🗑": st.column_config.CheckboxColumn("🗑", width="small", help="Marque para excluir."),
         "Tarefa": st.column_config.TextColumn(width="large"),
         "Tipo": st.column_config.SelectboxColumn(options=TIPO_OPTIONS, width="medium"),
-        "Responsável(is)": st.column_config.TextColumn(width="large"),
-        "Início": st.column_config.DateColumn(format="DD/MM/YYYY"),
-        "Fim": st.column_config.DateColumn(format="DD/MM/YYYY"),
+        "Responsável(is)": st.column_config.TextColumn(width="large", help="Use ' + ' para múltiplos."),
+        "Início": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Fim": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
         "Status da data": st.column_config.SelectboxColumn(options=DATE_CONFIDENCE_OPTIONS, width="medium"),
         "Obs": st.column_config.TextColumn(width="large"),
-        "ID": st.column_config.TextColumn(disabled=True, width="medium"),
     },
 )
 
@@ -357,12 +359,11 @@ if save_inline:
         # DELETE via RPC (transação)
         if to_delete_count > 0 and confirm_delete:
             to_delete = after[after["🗑"] == True]  # noqa: E712
-            for _, row in to_delete.iterrows():
-                task_id = normalize_str(row["ID"])
-                if task_id:
-                    rpc_delete_task(task_id)
-                    deleted_count += 1
+            for task_id in to_delete.index.astype(str).tolist():
+                rpc_delete_task(task_id)
+                deleted_count += 1
 
+        # updates (somente não deletadas)
         after_updates = after[after["🗑"] != True].copy()  # noqa: E712
         before_updates = before.loc[after_updates.index].copy()
 
@@ -370,9 +371,8 @@ if save_inline:
         n_updates = 0
         warnings: list[str] = []
 
-        for idx in after_updates.index:
-            rb = before_updates.loc[idx]
-            ra = after_updates.loc[idx]
+        for task_id, ra in after_updates.iterrows():
+            rb = before_updates.loc[task_id]
 
             changed = False
             for c in compare_cols:
@@ -382,14 +382,10 @@ if save_inline:
             if not changed:
                 continue
 
-            task_id = normalize_str(ra["ID"])
-            if not task_id:
-                continue
-
             start_v = ra["Início"]
             end_v = ra["Fim"]
             if start_v and end_v and end_v < start_v:
-                warnings.append(f"Linha {idx+1}: 'Fim' menor que 'Início' (ignorado).")
+                warnings.append(f"Tarefa {normalize_str(ra['Tarefa'])}: 'Fim' menor que 'Início' (ignorado).")
                 continue
 
             names = split_assignees(normalize_str(ra["Responsável(is)"])) or [PLACEHOLDER_PERSON_NAME]
@@ -405,11 +401,12 @@ if save_inline:
 
             if unknown:
                 warnings.append(
-                    f"Linha {idx+1}: responsáveis não cadastrados (responsáveis NÃO foram salvos): {', '.join(unknown)}"
+                    f"Tarefa {normalize_str(ra['Tarefa'])}: responsáveis não cadastrados (responsáveis NÃO foram salvos): "
+                    + ", ".join(unknown)
                 )
-                person_ids = []  # sinaliza “não atualizar responsáveis”
-            if not person_ids and not unknown:
-                person_ids = [placeholder_id]
+            else:
+                if not person_ids:
+                    person_ids = [placeholder_id]
 
             update_payload = {
                 "title": normalize_str(ra["Tarefa"]) or "Sem título",
@@ -420,11 +417,10 @@ if save_inline:
                 "notes": normalize_str(ra["Obs"]) or None,
             }
 
-            sb.table("tasks").update(update_payload).eq("id", task_id).execute()
+            sb.table("tasks").update(update_payload).eq("id", str(task_id)).execute()
 
-            # responsáveis só se não houve unknown
             if not unknown:
-                rpc_set_task_people(task_id, person_ids)
+                rpc_set_task_people(str(task_id), person_ids)
 
             n_updates += 1
 
@@ -443,5 +439,6 @@ if save_inline:
     except Exception as e:
         st.error("Erro ao salvar alterações:")
         st.code(_api_error_message(e))
+
 
 
