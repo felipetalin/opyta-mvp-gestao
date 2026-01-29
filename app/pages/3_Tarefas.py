@@ -27,9 +27,6 @@ except Exception:
         if user_email:
             st.caption(f"Logado como: {user_email}")
 
-            st.error("RODANDO ARQUIVO NOVO - BUILD 2026-01-29")
-
-
 
 # ==========================================================
 # Config (alinhado com constraints do Supabase)
@@ -104,7 +101,6 @@ def split_assignees(text: str) -> list[str]:
 
 
 def delete_task(task_id: str) -> None:
-    # remove relacionamentos antes
     sb.table("task_people").delete().eq("task_id", task_id).execute()
     sb.table("tasks").delete().eq("id", task_id).execute()
 
@@ -133,7 +129,6 @@ def normalize_str(x) -> str:
 # Loads (cache por usuário/sessão)
 # ==========================================================
 def _cache_key() -> str:
-    # garante que cache não "vaza" entre sessões
     return str(st.session_state.get("access_token") or "no-token")
 
 
@@ -151,11 +146,9 @@ def load_projects(_k: str):
 
 @st.cache_data(ttl=30)
 def load_people(_k: str):
-    # Ideal: filtrar active=true; mas mantendo compatibilidade caso não exista na view/select
     try:
         res = sb.table("people").select("id, name, active").order("name").execute()
-        rows = res.data or []
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(res.data or [])
         if not df.empty and "active" in df.columns:
             df = df[df["active"] == True]  # noqa: E712
     except Exception:
@@ -165,7 +158,6 @@ def load_people(_k: str):
     if df.empty:
         return df, {}, {}
 
-    # mapeamento exato por nome (respeita sua regra: não criar placeholder / não inventar)
     name_to_id = dict(zip(df["name"], df["id"]))
     id_to_name = dict(zip(df["id"], df["name"]))
     return df, name_to_id, id_to_name
@@ -173,7 +165,6 @@ def load_people(_k: str):
 
 @st.cache_data(ttl=30)
 def load_tasks_for_project(_k: str, project_id: str):
-    # tenta ler notes também; se view não tiver, a UI segue sem notes
     cols_try = "task_id, project_id, title, tipo_atividade, start_date, end_date, date_confidence, status, assignee_names, notes"
     try:
         res = (
@@ -335,6 +326,8 @@ with st.container(border=True):
 st.divider()
 st.subheader("Lista de tarefas (edite direto aqui)")
 
+st.caption("💡 Para excluir: marque a coluna 🗑 e depois clique em **Salvar alterações**.")
+
 try:
     df_tasks = load_tasks_for_project(k, project_id)
 except Exception as e:
@@ -349,7 +342,6 @@ if df_tasks.empty:
 df_tasks = df_tasks.copy()
 df_tasks.rename(columns={"task_id": "ID"}, inplace=True)
 
-# garante colunas
 if "assignee_names" not in df_tasks.columns:
     df_tasks["assignee_names"] = PLACEHOLDER_PERSON_NAME
 if "notes" not in df_tasks.columns:
@@ -357,6 +349,7 @@ if "notes" not in df_tasks.columns:
 
 df_show = pd.DataFrame(
     {
+        "🗑": False,  # coluna primeiro (visível)
         "Tarefa": df_tasks["title"].astype(str),
         "Tipo": df_tasks["tipo_atividade"].astype(str),
         "Responsável(is)": df_tasks["assignee_names"].fillna(PLACEHOLDER_PERSON_NAME).astype(str),
@@ -365,12 +358,11 @@ df_show = pd.DataFrame(
         "Status da data": df_tasks["date_confidence"].fillna("PLANEJADO").astype(str),
         "Obs": df_tasks["notes"].fillna("").astype(str),
         "ID": df_tasks["ID"].astype(str),
-        "🗑 Excluir": False,
     }
 )
 
-# Ordem solicitada: ID após Obs
-df_show = df_show[["Tarefa", "Tipo", "Responsável(is)", "Início", "Fim", "Status da data", "Obs", "ID", "🗑 Excluir"]]
+# Ordem final (🗑 no começo)
+df_show = df_show[["🗑", "Tarefa", "Tipo", "Responsável(is)", "Início", "Fim", "Status da data", "Obs", "ID"]]
 
 edited = st.data_editor(
     df_show,
@@ -378,6 +370,7 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="fixed",
     column_config={
+        "🗑": st.column_config.CheckboxColumn("🗑", width="small", help="Marque para excluir e clique em Salvar."),
         "Tarefa": st.column_config.TextColumn(width="large"),
         "Tipo": st.column_config.SelectboxColumn(options=TIPO_OPTIONS, width="medium"),
         "Responsável(is)": st.column_config.TextColumn(width="large", help="Use ' + ' para múltiplos."),
@@ -386,9 +379,14 @@ edited = st.data_editor(
         "Status da data": st.column_config.SelectboxColumn(options=DATE_CONFIDENCE_OPTIONS, width="medium"),
         "Obs": st.column_config.TextColumn(width="large"),
         "ID": st.column_config.TextColumn(disabled=True, width="medium"),
-        "🗑 Excluir": st.column_config.CheckboxColumn(width="small"),
     },
 )
+
+to_delete_count = int((edited["🗑"] == True).sum())  # noqa: E712
+confirm_delete = False
+if to_delete_count > 0:
+    st.warning(f"Você marcou **{to_delete_count}** tarefa(s) para exclusão.")
+    confirm_delete = st.checkbox("Confirmo a exclusão definitiva das tarefas marcadas", value=False)
 
 cbtn1, cbtn2 = st.columns([1, 1])
 with cbtn1:
@@ -405,20 +403,25 @@ if save_inline:
         before = df_show.copy()
         after = edited.copy()
 
-        # 1) Exclusões
-        to_delete = after[after["🗑 Excluir"] == True]  # noqa: E712
+        # 1) Exclusões (somente se confirmado)
         deleted_count = 0
-        for _, row in to_delete.iterrows():
-            task_id = normalize_str(row["ID"])
-            if task_id:
-                delete_task(task_id)
-                deleted_count += 1
+        if to_delete_count > 0 and not confirm_delete:
+            st.error("Para excluir, marque também a confirmação de exclusão definitiva.")
+            st.stop()
+
+        if to_delete_count > 0 and confirm_delete:
+            to_delete = after[after["🗑"] == True]  # noqa: E712
+            for _, row in to_delete.iterrows():
+                task_id = normalize_str(row["ID"])
+                if task_id:
+                    delete_task(task_id)
+                    deleted_count += 1
 
         # remove as deletadas da comparação de updates
-        after_updates = after[after["🗑 Excluir"] != True].copy()  # noqa: E712
+        after_updates = after[after["🗑"] != True].copy()  # noqa: E712
         before_updates = before.loc[after_updates.index].copy()
 
-        # 2) Updates (comparação robusta por colunas relevantes)
+        # 2) Updates (somente linhas alteradas)
         compare_cols = ["Tarefa", "Tipo", "Responsável(is)", "Início", "Fim", "Status da data", "Obs"]
         n_updates = 0
         warnings: list[str] = []
@@ -427,7 +430,6 @@ if save_inline:
             row_b = before_updates.loc[idx]
             row_a = after_updates.loc[idx]
 
-            # detecta mudança somente nessas colunas
             changed = False
             for c in compare_cols:
                 vb = row_b[c]
@@ -448,19 +450,16 @@ if save_inline:
             if not task_id:
                 continue
 
-            # valida datas
             start_v = row_a["Início"]
             end_v = row_a["Fim"]
             if start_v and end_v and end_v < start_v:
                 warnings.append(f"Linha {idx+1}: 'Fim' menor que 'Início' (update ignorado).")
                 continue
 
-            # responsáveis -> ids
             names = split_assignees(normalize_str(row_a["Responsável(is)"]))
             if not names:
                 names = [PLACEHOLDER_PERSON_NAME]
 
-            person_ids: list[str] | None
             unknown: list[str] = []
             resolved_ids: list[str] = []
             for n in names:
@@ -470,8 +469,8 @@ if save_inline:
                 else:
                     unknown.append(n)
 
+            person_ids: list[str] | None
             if unknown:
-                # regra: não salva responsáveis dessa linha, mas salva o resto
                 warnings.append(
                     f"Linha {idx+1}: responsáveis não cadastrados (responsáveis NÃO foram salvos): {', '.join(unknown)}"
                 )
@@ -490,7 +489,6 @@ if save_inline:
 
             sb.table("tasks").update(update_payload).eq("id", task_id).execute()
 
-            # atualiza responsáveis multi (se ok)
             if person_ids is not None:
                 set_task_people(task_id, person_ids)
 
@@ -511,4 +509,5 @@ if save_inline:
     except Exception as e:
         st.error("Erro ao salvar alterações:")
         st.code(_api_error_message(e))
+
 
