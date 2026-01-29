@@ -291,6 +291,7 @@ df_tasks = load_tasks_for_project(k, project_id)
 if df_tasks.empty:
     st.info("Sem tarefas nesse projeto.")
     st.stop()
+st.write("DEBUG sample:", df_tasks.head(3).to_dict(orient="records"))
 
 df_tasks = df_tasks.copy()
 df_tasks.rename(columns={"task_id": "ID"}, inplace=True)

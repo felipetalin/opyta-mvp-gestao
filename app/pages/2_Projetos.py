@@ -146,6 +146,7 @@ df = fetch_projects()
 if df.empty:
     st.info("Nenhum projeto cadastrado.")
     st.stop()
+st.write("DEBUG sample:", df.head(3).to_dict(orient="records"))
 
 df_show = pd.DataFrame(
     {
