@@ -9,8 +9,10 @@ import streamlit as st
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
-from ui.brand import apply_brand
-from ui.layout import apply_app_chrome, page_header, filter_bar_start
+
+# Branding / Chrome
+from ui.brand import apply_brand, apply_app_chrome, page_header
+from ui.layout import filter_bar_start
 
 
 # ==========================================================
@@ -140,8 +142,7 @@ types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() i
 # Pessoas: assignee_names vem "A + B + C"
 people_set = set()
 for s in df["assignee_names"].dropna().astype(str).tolist():
-    parts = [p.strip() for p in s.split("+")]
-    for p in parts:
+    for p in [x.strip() for x in s.split("+")]:
         if p:
             people_set.add(p)
 people_all = sorted(people_set)
@@ -149,7 +150,7 @@ people_all = sorted(people_set)
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 default_people = people_all
 
-# Atalho mês (range)
+# Atalho mês
 month_options = []
 for delta in [-2, -1, 0, 1, 2]:
     md = shift_month(today, delta)
@@ -178,19 +179,18 @@ with filter_bar_start():
     with c5:
         show_status = st.toggle("Status na barra", value=False)
 
-# Período: se escolher mês, força range do mês; senão manual
+# Período: mês força range do mês; senão manual
 if sel_month != "(manual)":
-    mstart = [x for x in month_options if x[0] == sel_month][0][1]
-    mend = [x for x in month_options if x[0] == sel_month][0][2]
-    period = (mstart, mend)
+    chosen = [x for x in month_options if x[0] == sel_month][0]
+    p_start, p_end = chosen[1], chosen[2]
+    st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 else:
     period = st.date_input("Período", value=(d0, d1), format="DD/MM/YYYY")
     if isinstance(period, tuple) and len(period) == 2:
-        period = (period[0], period[1])
+        p_start, p_end = period
     else:
-        period = (d0, d1)
+        p_start, p_end = d0, d1
 
-p_start, p_end = period
 p_start_dt = pd.to_datetime(p_start)
 p_end_dt = pd.to_datetime(p_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
@@ -238,7 +238,6 @@ order = (
 
 # Texto dentro da barra
 if show_status:
-    # ícones leves (sem poluir)
     status_icon = {
         "CONCLUIDA": "✓",
         "EM_ANDAMENTO": "…",
@@ -256,11 +255,10 @@ else:
 # ==========================================================
 # Cores
 # ==========================================================
-# CAMPO: verde escuro | RELATORIO: verde claro | ADMIN: azul acinzentado (bem distinto)
 color_map = {
     "CAMPO": "#1B5E20",
     "RELATORIO": "#66BB6A",
-    "ADMINISTRATIVO": "#2F6DAE",
+    "ADMINISTRATIVO": "#2F6DAE",  # distinto do CAMPO
 }
 
 # ==========================================================
@@ -303,7 +301,7 @@ fig.update_traces(
 
 fig.update_xaxes(range=[p_start_dt, p_end_dt])
 
-# ticks diários (STQQSSD + dd/mm)
+# ticks diários
 days = pd.date_range(p_start_dt.date(), p_end_dt.date(), freq="D")
 tickvals = [pd.to_datetime(d) for d in days]
 ticktext = [f"{pt_weekday_letter(d.date())} {d.day:02d}/{d.month:02d}" for d in days]
@@ -341,7 +339,7 @@ for d in days:
             )
         )
 
-# linha do dia atual (se dentro do range)
+# linha do dia atual
 today_dt = pd.to_datetime(date.today())
 if p_start_dt <= today_dt <= p_end_dt:
     shapes.append(
@@ -376,6 +374,7 @@ with st.expander("Dados (opcional)"):
         use_container_width=True,
         hide_index=True,
     )
+
 
 
 
