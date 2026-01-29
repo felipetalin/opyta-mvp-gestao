@@ -28,14 +28,11 @@ except Exception:
             st.caption(f"Logado como: {user_email}")
 
 
-# ==========================================================
-# Config (alinhado com constraints do Supabase)
-# ==========================================================
 TIPO_OPTIONS = ["CAMPO", "RELATORIO", "ADMINISTRATIVO"]
 DATE_CONFIDENCE_OPTIONS = ["PLANEJADO", "CONFIRMADO", "CANCELADO"]
 
-STATUS_DEFAULT = "PLANEJADA"  # coluna status ainda existe
-PLACEHOLDER_PERSON_NAME = "Profissional"  # placeholder único padronizado
+STATUS_DEFAULT = "PLANEJADA"
+PLACEHOLDER_PERSON_NAME = "Profissional"
 
 
 # ==========================================================
@@ -81,52 +78,33 @@ def to_date(x):
         return None
 
 
-def split_assignees(text: str) -> list[str]:
-    """
-    Aceita:
-      'Ana + Felipe'
-      'Ana, Felipe'
-      'Ana;Felipe'
-    Retorna lista limpa (preserva ordem).
-    """
-    if not text:
-        return []
-    parts = re.split(r"[+,;]", str(text))
-    names: list[str] = []
-    for p in parts:
-        n = p.strip()
-        if n:
-            names.append(n)
-    return names
-
-
-def delete_task(task_id: str) -> None:
-    sb.table("task_people").delete().eq("task_id", task_id).execute()
-    sb.table("tasks").delete().eq("id", task_id).execute()
-
-
-def set_task_people(task_id: str, person_ids: list[str]) -> None:
-    """
-    Regrava task_people.
-    Lead obrigatório: o 1º da lista vira is_lead=true.
-    Também mantém tasks.assignee_id = 1º.
-    """
-    sb.table("task_people").delete().eq("task_id", task_id).execute()
-
-    if not person_ids:
-        return
-
-    inserts = [{"task_id": task_id, "person_id": pid, "is_lead": (i == 0)} for i, pid in enumerate(person_ids)]
-    sb.table("task_people").insert(inserts).execute()
-    sb.table("tasks").update({"assignee_id": person_ids[0]}).eq("id", task_id).execute()
-
-
 def normalize_str(x) -> str:
     return ("" if x is None else str(x)).strip()
 
 
+def split_assignees(text: str) -> list[str]:
+    if not text:
+        return []
+    parts = re.split(r"[+,;]", str(text))
+    out: list[str] = []
+    for p in parts:
+        n = p.strip()
+        if n:
+            out.append(n)
+    return out
+
+
+def rpc_delete_task(task_id: str) -> None:
+    # Usa transação no banco para não quebrar a regra do lead
+    sb.rpc("rpc_delete_task", {"p_task_id": task_id}).execute()
+
+
+def rpc_set_task_people(task_id: str, person_ids: list[str]) -> None:
+    sb.rpc("rpc_set_task_people", {"p_task_id": task_id, "p_person_ids": person_ids}).execute()
+
+
 # ==========================================================
-# Loads (cache por usuário/sessão)
+# Loads
 # ==========================================================
 def _cache_key() -> str:
     return str(st.session_state.get("access_token") or "no-token")
@@ -159,8 +137,7 @@ def load_people(_k: str):
         return df, {}, {}
 
     name_to_id = dict(zip(df["name"], df["id"]))
-    id_to_name = dict(zip(df["id"], df["name"]))
-    return df, name_to_id, id_to_name
+    return df, name_to_id, dict(zip(df["id"], df["name"]))
 
 
 @st.cache_data(ttl=30)
@@ -187,14 +164,6 @@ def load_tasks_for_project(_k: str, project_id: str):
         return pd.DataFrame(res.data or [])
 
 
-def refresh_projects_cache():
-    load_projects.clear()
-
-
-def refresh_people_cache():
-    load_people.clear()
-
-
 def refresh_tasks_cache():
     load_tasks_for_project.clear()
 
@@ -211,11 +180,8 @@ if df_projects.empty:
 selected_label = st.selectbox("Projeto", df_projects["label"].tolist(), index=0)
 project_id = df_projects.loc[df_projects["label"] == selected_label, "id"].iloc[0]
 
-
-# ==========================================================
 # People + placeholder
-# ==========================================================
-df_people, people_map, _id_to_name = load_people(k)
+df_people, people_map, _ = load_people(k)
 if df_people.empty:
     st.warning("Tabela people está vazia.")
     st.stop()
@@ -235,16 +201,12 @@ with st.container(border=True):
     st.subheader("Nova tarefa")
 
     c1, c2, c3, c4 = st.columns([2.2, 1.2, 1.2, 1.2])
-
     with c1:
         title = st.text_input("Título", value="")
-
     with c2:
         tipo = st.selectbox("Tipo", TIPO_OPTIONS, index=0)
-
     with c3:
         start_date = st.date_input("Início", value=date.today(), format="DD/MM/YYYY")
-
     with c4:
         end_date = st.date_input("Fim", value=date.today(), format="DD/MM/YYYY")
 
@@ -262,79 +224,68 @@ with st.container(border=True):
 
     notes = st.text_area("Observações", value="", height=90)
 
-    create = st.button("Criar tarefa", type="primary")
-
-    if create:
+    if st.button("Criar tarefa", type="primary"):
         if not title.strip():
             st.error("Informe um título.")
-        elif end_date < start_date:
+            st.stop()
+        if end_date < start_date:
             st.error("Fim não pode ser menor que Início.")
-        else:
-            try:
-                names = split_assignees(assignees_text)
-                if not names:
-                    names = [PLACEHOLDER_PERSON_NAME]
+            st.stop()
 
-                person_ids: list[str] = []
-                unknown: list[str] = []
-                for n in names:
-                    pid = people_map.get(n)
-                    if pid:
-                        person_ids.append(pid)
-                    else:
-                        unknown.append(n)
+        try:
+            names = split_assignees(assignees_text) or [PLACEHOLDER_PERSON_NAME]
 
-                if unknown:
-                    st.error(
-                        "Alguns responsáveis não existem na tabela people:\n"
-                        + "\n".join([f"- {x}" for x in unknown])
-                        + "\n\nCadastre no Supabase ou corrija o texto."
-                    )
+            person_ids: list[str] = []
+            unknown: list[str] = []
+            for n in names:
+                pid = people_map.get(n)
+                if pid:
+                    person_ids.append(pid)
                 else:
-                    if not person_ids:
-                        person_ids = [placeholder_id]
+                    unknown.append(n)
 
-                    payload = {
-                        "project_id": project_id,
-                        "title": title.strip(),
-                        "tipo_atividade": tipo,
-                        "assignee_id": person_ids[0],
-                        "status": STATUS_DEFAULT,
-                        "start_date": start_date.isoformat(),
-                        "end_date": end_date.isoformat(),
-                        "date_confidence": date_conf,
-                        "notes": (notes or "").strip() or None,
-                    }
+            if unknown:
+                st.error("Responsáveis não cadastrados:\n" + "\n".join([f"- {x}" for x in unknown]))
+                st.stop()
 
-                    ins = sb.table("tasks").insert(payload).execute()
-                    new_id = ins.data[0]["id"]
+            if not person_ids:
+                person_ids = [placeholder_id]
 
-                    set_task_people(new_id, person_ids)
+            payload = {
+                "project_id": project_id,
+                "title": title.strip(),
+                "tipo_atividade": tipo,
+                "assignee_id": person_ids[0],
+                "status": STATUS_DEFAULT,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "date_confidence": date_conf,
+                "notes": (notes or "").strip() or None,
+            }
 
-                    st.success("Tarefa criada com sucesso.")
-                    refresh_tasks_cache()
-                    st.rerun()
+            ins = sb.table("tasks").insert(payload).execute()
+            new_id = ins.data[0]["id"]
 
-            except Exception as e:
-                st.error("Erro ao criar tarefa:")
-                st.code(_api_error_message(e))
+            # usa RPC pra não violar regra do lead
+            rpc_set_task_people(new_id, person_ids)
+
+            st.success("Tarefa criada com sucesso.")
+            refresh_tasks_cache()
+            st.rerun()
+
+        except Exception as e:
+            st.error("Erro ao criar tarefa:")
+            st.code(_api_error_message(e))
 
 
 # ==========================================================
-# Lista (edição inline + exclusão por linha)
+# Lista
 # ==========================================================
 st.divider()
 st.subheader("Lista de tarefas (edite direto aqui)")
+st.caption("💡 Para excluir: marque 🗑, confirme a exclusão e clique em **Salvar alterações**.")
 
-st.caption("💡 Para excluir: marque a coluna 🗑 e depois clique em **Salvar alterações**.")
-
-try:
-    df_tasks = load_tasks_for_project(k, project_id)
-except Exception as e:
-    st.error("Erro ao carregar tarefas (view v_portfolio_tasks).")
-    st.code(_api_error_message(e))
-    st.stop()
-
+df_tasks = load_tasks_for_project(k, project_id)
 if df_tasks.empty:
     st.info("Sem tarefas nesse projeto.")
     st.stop()
@@ -349,7 +300,7 @@ if "notes" not in df_tasks.columns:
 
 df_show = pd.DataFrame(
     {
-        "🗑": False,  # coluna primeiro (visível)
+        "🗑": False,
         "Tarefa": df_tasks["title"].astype(str),
         "Tipo": df_tasks["tipo_atividade"].astype(str),
         "Responsável(is)": df_tasks["assignee_names"].fillna(PLACEHOLDER_PERSON_NAME).astype(str),
@@ -361,19 +312,16 @@ df_show = pd.DataFrame(
     }
 )
 
-# Ordem final (🗑 no começo)
-df_show = df_show[["🗑", "Tarefa", "Tipo", "Responsável(is)", "Início", "Fim", "Status da data", "Obs", "ID"]]
-
 edited = st.data_editor(
     df_show,
     use_container_width=True,
     hide_index=True,
     num_rows="fixed",
     column_config={
-        "🗑": st.column_config.CheckboxColumn("🗑", width="small", help="Marque para excluir e clique em Salvar."),
+        "🗑": st.column_config.CheckboxColumn("🗑", width="small"),
         "Tarefa": st.column_config.TextColumn(width="large"),
         "Tipo": st.column_config.SelectboxColumn(options=TIPO_OPTIONS, width="medium"),
-        "Responsável(is)": st.column_config.TextColumn(width="large", help="Use ' + ' para múltiplos."),
+        "Responsável(is)": st.column_config.TextColumn(width="large"),
         "Início": st.column_config.DateColumn(format="DD/MM/YYYY"),
         "Fim": st.column_config.DateColumn(format="DD/MM/YYYY"),
         "Status da data": st.column_config.SelectboxColumn(options=DATE_CONFIDENCE_OPTIONS, width="medium"),
@@ -389,10 +337,8 @@ if to_delete_count > 0:
     confirm_delete = st.checkbox("Confirmo a exclusão definitiva das tarefas marcadas", value=False)
 
 cbtn1, cbtn2 = st.columns([1, 1])
-with cbtn1:
-    save_inline = st.button("Salvar alterações", type="primary")
-with cbtn2:
-    reload_inline = st.button("Recarregar")
+save_inline = cbtn1.button("Salvar alterações", type="primary")
+reload_inline = cbtn2.button("Recarregar")
 
 if reload_inline:
     refresh_tasks_cache()
@@ -403,94 +349,82 @@ if save_inline:
         before = df_show.copy()
         after = edited.copy()
 
-        # 1) Exclusões (somente se confirmado)
         deleted_count = 0
         if to_delete_count > 0 and not confirm_delete:
             st.error("Para excluir, marque também a confirmação de exclusão definitiva.")
             st.stop()
 
+        # DELETE via RPC (transação)
         if to_delete_count > 0 and confirm_delete:
             to_delete = after[after["🗑"] == True]  # noqa: E712
             for _, row in to_delete.iterrows():
                 task_id = normalize_str(row["ID"])
                 if task_id:
-                    delete_task(task_id)
+                    rpc_delete_task(task_id)
                     deleted_count += 1
 
-        # remove as deletadas da comparação de updates
         after_updates = after[after["🗑"] != True].copy()  # noqa: E712
         before_updates = before.loc[after_updates.index].copy()
 
-        # 2) Updates (somente linhas alteradas)
         compare_cols = ["Tarefa", "Tipo", "Responsável(is)", "Início", "Fim", "Status da data", "Obs"]
         n_updates = 0
         warnings: list[str] = []
 
         for idx in after_updates.index:
-            row_b = before_updates.loc[idx]
-            row_a = after_updates.loc[idx]
+            rb = before_updates.loc[idx]
+            ra = after_updates.loc[idx]
 
             changed = False
             for c in compare_cols:
-                vb = row_b[c]
-                va = row_a[c]
-                if isinstance(vb, (date,)) and isinstance(va, (date,)):
-                    if vb != va:
-                        changed = True
-                        break
-                else:
-                    if normalize_str(vb) != normalize_str(va):
-                        changed = True
-                        break
-
+                if normalize_str(rb[c]) != normalize_str(ra[c]):
+                    changed = True
+                    break
             if not changed:
                 continue
 
-            task_id = normalize_str(row_a["ID"])
+            task_id = normalize_str(ra["ID"])
             if not task_id:
                 continue
 
-            start_v = row_a["Início"]
-            end_v = row_a["Fim"]
+            start_v = ra["Início"]
+            end_v = ra["Fim"]
             if start_v and end_v and end_v < start_v:
-                warnings.append(f"Linha {idx+1}: 'Fim' menor que 'Início' (update ignorado).")
+                warnings.append(f"Linha {idx+1}: 'Fim' menor que 'Início' (ignorado).")
                 continue
 
-            names = split_assignees(normalize_str(row_a["Responsável(is)"]))
-            if not names:
-                names = [PLACEHOLDER_PERSON_NAME]
+            names = split_assignees(normalize_str(ra["Responsável(is)"])) or [PLACEHOLDER_PERSON_NAME]
 
             unknown: list[str] = []
-            resolved_ids: list[str] = []
+            person_ids: list[str] = []
             for n in names:
                 pid = people_map.get(n)
                 if pid:
-                    resolved_ids.append(pid)
+                    person_ids.append(pid)
                 else:
                     unknown.append(n)
 
-            person_ids: list[str] | None
             if unknown:
                 warnings.append(
                     f"Linha {idx+1}: responsáveis não cadastrados (responsáveis NÃO foram salvos): {', '.join(unknown)}"
                 )
-                person_ids = None
-            else:
-                person_ids = resolved_ids if resolved_ids else [placeholder_id]
+                person_ids = []  # sinaliza “não atualizar responsáveis”
+            if not person_ids and not unknown:
+                person_ids = [placeholder_id]
 
             update_payload = {
-                "title": normalize_str(row_a["Tarefa"]) or "Sem título",
-                "tipo_atividade": normalize_str(row_a["Tipo"]) or TIPO_OPTIONS[0],
+                "title": normalize_str(ra["Tarefa"]) or "Sem título",
+                "tipo_atividade": normalize_str(ra["Tipo"]) or TIPO_OPTIONS[0],
                 "start_date": start_v.isoformat() if start_v else None,
                 "end_date": end_v.isoformat() if end_v else None,
-                "date_confidence": normalize_str(row_a["Status da data"]) or DATE_CONFIDENCE_OPTIONS[0],
-                "notes": normalize_str(row_a["Obs"]) or None,
+                "date_confidence": normalize_str(ra["Status da data"]) or DATE_CONFIDENCE_OPTIONS[0],
+                "notes": normalize_str(ra["Obs"]) or None,
             }
 
             sb.table("tasks").update(update_payload).eq("id", task_id).execute()
 
-            if person_ids is not None:
-                set_task_people(task_id, person_ids)
+            # responsáveis só se não houve unknown
+            if not unknown:
+                rpc_set_task_people(task_id, person_ids)
 
             n_updates += 1
 
