@@ -30,7 +30,7 @@ page_header("Portfólio (Gantt)", "Filtros + cronograma", st.session_state.get("
 # ==========================================================
 # Helpers
 # ==========================================================
-def month_range(d: date):
+def month_range(d):
     first = d.replace(day=1)
     if first.month == 12:
         nxt = first.replace(year=first.year + 1, month=1, day=1)
@@ -40,7 +40,7 @@ def month_range(d: date):
     return first, last
 
 
-def shift_month_first(d: date, delta: int) -> date:
+def shift_month_first(d, delta):
     y = d.year
     m = d.month + delta
     while m > 12:
@@ -52,13 +52,13 @@ def shift_month_first(d: date, delta: int) -> date:
     return date(y, m, 1)
 
 
-def month_label(d: date) -> str:
+def month_label(d):
     meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
     return f"{meses[d.month-1]}/{d.year}"
 
 
-def pt_weekday_letter(d: date) -> str:
-    letters = ["S", "T", "Q", "Q", "S", "S", "D"]  # Mon..Sun
+def pt_weekday_letter(d):
+    letters = ["S", "T", "Q", "Q", "S", "S", "D"]
     return letters[d.weekday()]
 
 
@@ -75,11 +75,11 @@ def safe_text(x, default=""):
     return s
 
 
-def normalize_status(x: str) -> str:
+def normalize_status(x):
     return safe_text(x).upper().strip()
 
 
-def split_people(assignee_names: str) -> list[str]:
+def split_people(assignee_names):
     out = []
     for p in str(assignee_names or "").split("+"):
         t = p.strip()
@@ -88,7 +88,7 @@ def split_people(assignee_names: str) -> list[str]:
     return out
 
 
-def make_period_presets(today_: date):
+def make_period_presets(today_):
     cur_first = shift_month_first(today_, 0)
     prev_first = shift_month_first(today_, -1)
     next_first = shift_month_first(today_, 1)
@@ -108,7 +108,7 @@ def make_period_presets(today_: date):
     ]
 
 
-def _api_error_message(e: Exception) -> str:
+def _api_error_message(e):
     try:
         if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
             d = e.args[0]
@@ -126,8 +126,31 @@ def _api_error_message(e: Exception) -> str:
         return "Erro desconhecido."
 
 
+def _ss_setdefault(k, v):
+    if k not in st.session_state:
+        st.session_state[k] = v
+
+
 # ==========================================================
-# Data sources (projects + presets)
+# Session defaults (presets)
+# ==========================================================
+today = date.today()
+d0, d1 = month_range(today)
+period_presets = make_period_presets(today)
+period_labels = [p[0] for p in period_presets]
+
+_ss_setdefault("pf_project", "Todos")
+_ss_setdefault("pf_types", ["CAMPO", "RELATORIO", "ADMINISTRATIVO"])
+_ss_setdefault("pf_people", [])
+_ss_setdefault("pf_period_preset", period_labels[1] if len(period_labels) > 1 else "(manual)")
+_ss_setdefault("pf_manual_start", d0)
+_ss_setdefault("pf_manual_end", d1)
+_ss_setdefault("pf_show_status", False)
+_ss_setdefault("pf_show_cancelled", True)
+
+
+# ==========================================================
+# DB helpers (projects + presets)
 # ==========================================================
 @st.cache_data(ttl=60)
 def load_projects_codes():
@@ -140,15 +163,23 @@ def load_projects_codes():
 
 @st.cache_data(ttl=30)
 def load_presets():
-    # RLS: só retorna do usuário logado
-    res = sb.table("user_filter_presets").select("name,payload,updated_at").order("updated_at", desc=True).execute()
+    res = (
+        sb.table("user_filter_presets")
+        .select("name,payload,updated_at")
+        .order("updated_at", desc=True)
+        .execute()
+    )
     rows = res.data or []
-    presets = {r["name"]: r.get("payload") for r in rows if r.get("name")}
-    names = list(presets.keys())
-    return names, presets
+    preset_map = {}
+    for r in rows:
+        n = r.get("name")
+        if n:
+            preset_map[n] = r.get("payload") or {}
+    names = list(preset_map.keys())
+    return names, preset_map
 
 
-def save_preset(name: str, payload: dict):
+def save_preset(name, payload):
     # upsert pelo unique(owner_id, name)
     sb.table("user_filter_presets").upsert(
         {"name": name, "payload": payload},
@@ -156,34 +187,24 @@ def save_preset(name: str, payload: dict):
     ).execute()
 
 
-def delete_preset(name: str):
+def delete_preset(name):
     sb.table("user_filter_presets").delete().eq("name", name).execute()
 
 
-# ==========================================================
-# Fetch portfolio (performance)
-# ==========================================================
-PORTFOLIO_COLS = (
-    "task_id,project_id,project_code,title,tipo_atividade,start_date,end_date,status,assignee_names"
-)
+PORTFOLIO_COLS = "task_id,project_id,project_code,title,tipo_atividade,start_date,end_date,status,assignee_names"
+
 
 @st.cache_data(ttl=30)
-def fetch_portfolio(project_code: str | None, p_start: str, p_end: str, tipo_list: tuple[str, ...], show_cancelled: bool):
-    """
-    Performance:
-    - Não usa select("*")
-    - Filtra no Supabase por projeto + interseção de datas + tipo + canceladas (se desligado)
-    """
+def fetch_portfolio(project_code, p_start_iso, p_end_iso, tipo_list, show_cancelled):
     q = sb.table("v_portfolio_tasks").select(PORTFOLIO_COLS)
 
     if project_code and project_code != "Todos":
         q = q.eq("project_code", project_code)
 
     # overlap: start_date <= p_end AND end_date >= p_start
-    q = q.lte("start_date", p_end).gte("end_date", p_start)
+    q = q.lte("start_date", p_end_iso).gte("end_date", p_start_iso)
 
     if tipo_list:
-        # supabase-py suporta in_()
         q = q.in_("tipo_atividade", list(tipo_list))
 
     if not show_cancelled:
@@ -194,34 +215,11 @@ def fetch_portfolio(project_code: str | None, p_start: str, p_end: str, tipo_lis
 
 
 # ==========================================================
-# Session defaults (para presets)
-# ==========================================================
-today = date.today()
-d0, d1 = month_range(today)
-presets_period = make_period_presets(today)
-preset_period_labels = [p[0] for p in presets_period]
-
-def _ss_setdefault(k, v):
-    if k not in st.session_state:
-        st.session_state[k] = v
-
-_ss_setdefault("pf_project", "Todos")
-_ss_setdefault("pf_types", ["CAMPO", "RELATORIO", "ADMINISTRATIVO"])
-_ss_setdefault("pf_people", [])
-_ss_setdefault("pf_period_preset", preset_period_labels[1] if len(preset_period_labels) > 1 else "(manual)")
-_ss_setdefault("pf_manual_start", d0)
-_ss_setdefault("pf_manual_end", d1)
-_ss_setdefault("pf_show_status", False)
-_ss_setdefault("pf_show_cancelled", True)
-
-
-# ==========================================================
-# Presets UI (load/save/delete) + filtros
+# UI: filtros + presets
 # ==========================================================
 project_options = load_projects_codes()
 preset_names, preset_map = load_presets()
 
-# garante que selection não explode
 if st.session_state["pf_project"] not in project_options:
     st.session_state["pf_project"] = "Todos"
 
@@ -231,7 +229,7 @@ with filter_bar_start():
     top1, top2 = st.columns([2.3, 1.7])
 
     with top1:
-        c_p, c_t, c_pe = st.columns([1.1, 1.6, 2.2])
+        c_p, c_t = st.columns([1.1, 1.6])
 
         with c_p:
             st.selectbox("Projeto", project_options, key="pf_project")
@@ -239,10 +237,9 @@ with filter_bar_start():
         with c_t:
             st.multiselect("Tipo Atividade", types_all, key="pf_types")
 
-        # período preset
         c_per1, c_per2, c_per3 = st.columns([1.7, 1.2, 1.2])
         with c_per1:
-            st.selectbox("Atalho (período)", preset_period_labels, key="pf_period_preset")
+            st.selectbox("Atalho (período)", period_labels, key="pf_period_preset")
         with c_per2:
             st.toggle("Status na barra", key="pf_show_status")
         with c_per3:
@@ -251,7 +248,6 @@ with filter_bar_start():
     with top2:
         st.caption("Presets")
         preset_sel = st.selectbox("Carregar preset", ["—"] + preset_names, index=0, key="pf_preset_sel")
-
         b1, b2, b3 = st.columns([1, 1, 1])
         with b1:
             do_load = st.button("Carregar", use_container_width=True)
@@ -260,17 +256,16 @@ with filter_bar_start():
         with b3:
             do_save = st.button("Salvar", type="primary", use_container_width=True)
 
-        preset_name_input = st.text_input("Nome do preset", value="", placeholder="Ex: 2 meses + Todos + Campo", key="pf_preset_name")
+        st.text_input("Nome do preset", value="", placeholder="Ex: 2 meses + Todos + Campo", key="pf_preset_name")
 
-# Ação: carregar preset
+# carregar preset
 if do_load and preset_sel != "—":
     payload = preset_map.get(preset_sel) or {}
-    # aplica em session_state (chaves dos widgets)
     for k, v in payload.items():
         st.session_state[k] = v
     st.rerun()
 
-# Ação: excluir preset
+# excluir preset
 if do_delete:
     if preset_sel == "—":
         st.warning("Selecione um preset para excluir.")
@@ -284,13 +279,12 @@ if do_delete:
             st.error("Erro ao excluir preset:")
             st.code(_api_error_message(e))
 
-# Resolve período (preset ou manual)
-chosen_period = [p for p in presets_period if p[0] == st.session_state["pf_period_preset"]][0]
-if chosen_period[0] != "(manual)":
-    p_start, p_end = chosen_period[1], chosen_period[2]
+# período
+chosen = [p for p in period_presets if p[0] == st.session_state["pf_period_preset"]][0]
+if chosen[0] != "(manual)":
+    p_start, p_end = chosen[1], chosen[2]
     st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 else:
-    # manual
     period = st.date_input(
         "Período (manual)",
         value=(st.session_state["pf_manual_start"], st.session_state["pf_manual_end"]),
@@ -303,7 +297,7 @@ else:
     st.session_state["pf_manual_start"] = p_start
     st.session_state["pf_manual_end"] = p_end
 
-# Ação: salvar preset (salva após termos p_start/p_end resolvidos)
+# salvar preset
 if do_save:
     name = (st.session_state.get("pf_preset_name") or "").strip()
     if not name:
@@ -330,24 +324,21 @@ if do_save:
 
 
 # ==========================================================
-# Fetch otimizado (Supabase) -> opções de pessoas -> filtro final
+# Fetch otimizado + filtro pessoas
 # ==========================================================
 p_start_dt = pd.to_datetime(p_start)
 p_end_dt = pd.to_datetime(p_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
 
 sel_project = st.session_state["pf_project"]
 sel_types = st.session_state["pf_types"] or []
-sel_types_tuple = tuple(sel_types)
-
 show_cancelled = bool(st.session_state["pf_show_cancelled"])
 show_status = bool(st.session_state["pf_show_status"])
 
-# 1) Busca já filtrada no servidor (projeto + período + tipo + canceladas)
 df = fetch_portfolio(
     None if sel_project == "Todos" else sel_project,
     p_start.isoformat(),
     p_end.isoformat(),
-    sel_types_tuple,
+    sel_types,
     show_cancelled,
 )
 
@@ -355,7 +346,7 @@ if df.empty:
     st.info("Ainda não há tarefas no portfólio (ou os filtros zeraram a lista).")
     st.stop()
 
-# Normalizações (defensivo)
+# normalização defensiva
 df["start_date"] = to_dt(df.get("start_date"))
 df["end_date"] = to_dt(df.get("end_date"))
 df["end_date"] = df["end_date"].fillna(df["start_date"])
@@ -377,47 +368,43 @@ for col, default in [
 
 df["status_norm"] = df["status"].apply(normalize_status)
 
-# eixo Y
 df["label"] = (
     df["project_code"].astype(str).fillna("").str.strip()
     + " | "
     + df["title"].astype(str).fillna("").str.strip()
 ).str.strip(" |")
 
-# 2) Pessoas disponíveis (do dataset já filtrado)
+# pessoas possíveis (dado já filtrado)
 people_set = set()
 for s in df["assignee_names"].astype(str).tolist():
     for p in split_people(s):
         people_set.add(p)
 people_all = sorted(people_set)
 
-# garante que o preset não “quebra” o multiselect (inclui os selecionados)
 people_opts = sorted(set(people_all) | set(st.session_state.get("pf_people") or []))
+sel_people = st.multiselect(
+    "Profissionais (refinar)",
+    people_opts,
+    default=st.session_state.get("pf_people") or [],
+    key="pf_people",
+)
 
-# multiselect de pessoas (fora do filter_bar_start, mas ainda em cima)
-sel_people = st.multiselect("Profissionais (refinar)", people_opts, default=st.session_state.get("pf_people") or [], key="pf_people")
-
-# 3) Filtro pessoas (client-side)
 f = df.copy()
 if sel_people:
     patt = "|".join(re.escape(p.strip()) for p in sel_people if p and p.strip())
     if patt:
         f = f[f["assignee_names"].astype(str).str.contains(patt, regex=True, na=False)]
-else:
-    # se usuário removeu tudo, mantém tudo (mais amigável)
-    f = f
 
-# Interseção final com janela (defensivo)
 f = f[(f["start_date"] <= p_end_dt) & (f["end_date"] >= p_start_dt)].copy()
 if f.empty:
     st.info("Sem tarefas após filtro de profissionais.")
     st.stop()
 
-# Clamp visual
+# clamp visual
 f["plot_start"] = f["start_date"].clip(lower=p_start_dt)
 f["plot_end"] = f["end_date"].clip(upper=p_end_dt)
 
-# Ordem
+# ordem
 order = (
     f.groupby("label")["plot_start"]
     .min()
@@ -426,7 +413,7 @@ order = (
     .tolist()
 )
 
-# Texto barra
+# texto barra
 status_icon = {
     "CONCLUIDA": "✓",
     "EM_ANDAMENTO": "…",
@@ -445,18 +432,16 @@ else:
         axis=1,
     )
 
-# Canceladas: categoria separada (cinza)
+# canceladas cinza
 f["tipo_plot"] = f["tipo_atividade"].astype(str)
 f.loc[f["status_norm"] == "CANCELADA", "tipo_plot"] = "CANCELADA"
 
-# Cores
 color_map = {
     "CAMPO": "#1B5E20",
     "RELATORIO": "#66BB6A",
     "ADMINISTRATIVO": "#2F6DAE",
     "CANCELADA": "#9E9E9E",
 }
-
 
 # ==========================================================
 # Gantt
@@ -500,7 +485,6 @@ fig.update_traces(
 
 fig.update_xaxes(range=[p_start_dt, p_end_dt])
 
-# ticks diários
 days = pd.date_range(p_start_dt.date(), p_end_dt.date(), freq="D")
 tickvals = [pd.to_datetime(d) for d in days]
 ticktext = [f"{pt_weekday_letter(d.date())} {d.day:02d}/{d.month:02d}" for d in days]
@@ -515,9 +499,7 @@ fig.update_xaxes(
     title_text="",
 )
 
-# Shapes: fim de semana + linha do hoje
 shapes = []
-
 for d in days:
     if d.weekday() >= 5:
         x0 = pd.to_datetime(d.date())
@@ -565,10 +547,7 @@ fig.update_layout(height=max(420, 80 + row_count * 55))
 
 st.plotly_chart(fig, use_container_width=True)
 
-
-# ==========================================================
-# Export CSV do filtro
-# ==========================================================
+# Export CSV
 export_cols = ["project_code", "title", "tipo_atividade", "assignee_names", "status", "start_date", "end_date"]
 export_cols = [c for c in export_cols if c in f.columns]
 export_df = f[export_cols].copy()
@@ -588,9 +567,6 @@ with st.expander("Dados (opcional)"):
         use_container_width=True,
         hide_index=True,
     )
-
-    )
-
 
 
 
