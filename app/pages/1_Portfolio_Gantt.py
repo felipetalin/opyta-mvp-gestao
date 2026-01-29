@@ -1,7 +1,6 @@
 # app/pages/1_Portfolio_Gantt.py
 
 import re
-from contextlib import contextmanager
 from datetime import date, timedelta
 
 import pandas as pd
@@ -10,39 +9,12 @@ import streamlit as st
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
-
-# ==========================================================
-# Branding / Layout (com fallback seguro)
-# ==========================================================
-try:
-    from ui.brand import apply_brand, apply_app_chrome, page_header  # padrão novo
-except Exception:
-    from ui.brand import apply_brand  # type: ignore
-
-    def apply_app_chrome():  # type: ignore
-        return
-
-    def page_header(title, subtitle, user_email=""):  # type: ignore
-        st.title(title)
-        if subtitle:
-            st.caption(subtitle)
-        if user_email:
-            st.caption(f"Logado como: {user_email}")
-
-
-# filter_bar_start pode estar em ui.layout; se não existir, faz fallback simples
-try:
-    from ui.layout import filter_bar_start  # type: ignore
-except Exception:
-
-    @contextmanager
-    def filter_bar_start():  # type: ignore
-        with st.container():
-            yield
+from ui.brand import apply_brand
+from ui.layout import apply_app_chrome, page_header, filter_bar_start
 
 
 # ==========================================================
-# Boot (ordem correta)
+# Boot (ordem obrigatória)
 # ==========================================================
 st.set_page_config(page_title="Portfólio (Gantt)", layout="wide")
 apply_brand()
@@ -67,39 +39,43 @@ def month_range(d: date):
     return first, last
 
 
-def add_months(d: date, delta_months: int) -> date:
-    # move meses preservando o dia (com clamp)
-    y = d.year + (d.month - 1 + delta_months) // 12
-    m = (d.month - 1 + delta_months) % 12 + 1
-    day = min(d.day, [31, 29 if (y % 4 == 0 and (y % 100 != 0 or y % 400 == 0)) else 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][m - 1])
-    return date(y, m, day)
-
-
 def pt_weekday_letter(d: date) -> str:
     letters = ["S", "T", "Q", "Q", "S", "S", "D"]  # Mon..Sun
     return letters[d.weekday()]
 
 
-def _api_error_message(e: Exception) -> str:
-    try:
-        if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
-            d = e.args[0]
-            msg = d.get("message") or str(d)
-            details = d.get("details")
-            hint = d.get("hint")
-            out = msg
-            if hint:
-                out += f"\nHint: {hint}"
-            if details:
-                out += f"\nDetalhes: {details}"
-            return out
-        return str(e)
-    except Exception:
-        return str(e)
+def to_dt(x):
+    return pd.to_datetime(x, errors="coerce")
+
+
+def safe_text(x, default=""):
+    if x is None or (isinstance(x, float) and pd.isna(x)):
+        return default
+    s = str(x).strip()
+    if s in ("None", "nan", "NaT"):
+        return default
+    return s
+
+
+def month_label(d: date) -> str:
+    meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+    return f"{meses[d.month-1]}/{d.year}"
+
+
+def shift_month(d: date, delta: int) -> date:
+    y = d.year
+    m = d.month + delta
+    while m > 12:
+        y += 1
+        m -= 12
+    while m < 1:
+        y -= 1
+        m += 12
+    return date(y, m, 1)
 
 
 # ==========================================================
-# Carregar dados da VIEW
+# Load (view)
 # ==========================================================
 @st.cache_data(ttl=30)
 def fetch_portfolio_view():
@@ -113,20 +89,18 @@ if df.empty:
     st.warning("Nenhuma tarefa encontrada na view v_portfolio_tasks.")
     st.stop()
 
-# ==========================================================
-# Normalização / Fallbacks
-# ==========================================================
-df["start_date"] = pd.to_datetime(df.get("start_date"), errors="coerce")
-df["end_date"] = pd.to_datetime(df.get("end_date"), errors="coerce")
+# Datas
+df["start_date"] = to_dt(df.get("start_date"))
+df["end_date"] = to_dt(df.get("end_date"))
 
-# Se end_date estiver vazio, assume start_date (tarefa 1 dia)
+# Se end_date vazio, assume start_date
 df["end_date"] = df["end_date"].fillna(df["start_date"])
-
 df = df.dropna(subset=["start_date", "end_date"]).copy()
 if df.empty:
     st.warning("Existem registros, mas sem start_date/end_date válidos.")
     st.stop()
 
+# Fallbacks esperados
 if "project_code" not in df.columns:
     df["project_code"] = ""
 if "title" not in df.columns:
@@ -134,34 +108,34 @@ if "title" not in df.columns:
 if "tipo_atividade" not in df.columns:
     df["tipo_atividade"] = "CAMPO"
 
-# assignee_names (padrão atual). Sem “a definir”.
+# assignee_names (padrão novo). Se vier assignee_name antigo, converte.
 if "assignee_names" not in df.columns:
     if "assignee_name" in df.columns:
         df["assignee_names"] = df["assignee_name"].fillna("Profissional")
     else:
         df["assignee_names"] = "Profissional"
-else:
-    df["assignee_names"] = df["assignee_names"].fillna("Profissional")
+df["assignee_names"] = df["assignee_names"].fillna("Profissional")
 
-# status (pra tooltip)
+# status (pode existir ou não)
 if "status" not in df.columns:
     df["status"] = ""
 
-# Label do eixo Y: COD | Título
+# Label no eixo Y
 df["label"] = (
     df["project_code"].astype(str).fillna("").str.strip()
     + " | "
     + df["title"].astype(str).fillna("").str.strip()
 ).str.strip(" |")
 
+
 # ==========================================================
-# Filtros + atalhos de mês
+# Filtros
 # ==========================================================
 today = date.today()
 d0, d1 = month_range(today)
 
-projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if str(p).strip()])
-types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if str(t).strip()])
+projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if safe_text(p)])
+types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if safe_text(t)])
 
 # Pessoas: assignee_names vem "A + B + C"
 people_set = set()
@@ -175,19 +149,19 @@ people_all = sorted(people_set)
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 default_people = people_all
 
-# meses disponíveis no dataset (pelo start_date)
-df_months = pd.to_datetime(df["start_date"], errors="coerce").dropna()
-months_unique = (
-    df_months.dt.to_period("M").astype(str).dropna().unique().tolist()
-    if not df_months.empty
-    else []
-)
-months_unique = sorted(months_unique)
+# Atalho mês (range)
+month_options = []
+for delta in [-2, -1, 0, 1, 2]:
+    md = shift_month(today, delta)
+    mstart, mend = month_range(md)
+    key = month_label(md)
+    month_options.append((key, mstart, mend))
 
-month_options = ["(Manual)"] + ["Mês atual", "Mês anterior", "Próximo mês"] + months_unique
+month_labels = ["(manual)"] + [m[0] for m in month_options]
+default_month_index = month_labels.index(month_label(today)) if month_label(today) in month_labels else 0
 
 with filter_bar_start():
-    c1, c2, c3, c4, c5 = st.columns([1.2, 1.3, 1.6, 1.3, 1.0])
+    c1, c2, c3, c4, c5 = st.columns([1.2, 1.7, 2.3, 1.2, 1.0])
 
     with c1:
         sel_project = st.selectbox("Projeto", projects, index=0)
@@ -199,38 +173,27 @@ with filter_bar_start():
         sel_people = st.multiselect("Profissionais", people_all, default=default_people)
 
     with c4:
-        sel_month = st.selectbox("Atalho (mês)", month_options, index=1)  # default: Mês atual
+        sel_month = st.selectbox("Atalho (mês)", month_labels, index=default_month_index)
 
     with c5:
-        show_status_in_bar = st.toggle("Status na barra", value=False, help="Mostra um sufixo no texto da barra. Tooltip já inclui status.")
+        show_status = st.toggle("Status na barra", value=False)
 
-# período (manual) sempre existe, mas o atalho pode sobrescrever
-period = st.date_input("Período", value=(d0, d1), format="DD/MM/YYYY")
-
-if isinstance(period, tuple) and len(period) == 2:
-    p_start, p_end = period
+# Período: se escolher mês, força range do mês; senão manual
+if sel_month != "(manual)":
+    mstart = [x for x in month_options if x[0] == sel_month][0][1]
+    mend = [x for x in month_options if x[0] == sel_month][0][2]
+    period = (mstart, mend)
 else:
-    p_start, p_end = d0, d1
-
-# aplica atalho de mês (sem te obrigar a usar o date_input)
-if sel_month and sel_month != "(Manual)":
-    if sel_month == "Mês atual":
-        p_start, p_end = month_range(today)
-    elif sel_month == "Mês anterior":
-        p_start, p_end = month_range(add_months(today, -1))
-    elif sel_month == "Próximo mês":
-        p_start, p_end = month_range(add_months(today, 1))
+    period = st.date_input("Período", value=(d0, d1), format="DD/MM/YYYY")
+    if isinstance(period, tuple) and len(period) == 2:
+        period = (period[0], period[1])
     else:
-        # formato "YYYY-MM"
-        try:
-            y, m = sel_month.split("-")
-            p_start = date(int(y), int(m), 1)
-            p_start, p_end = month_range(p_start)
-        except Exception:
-            pass
+        period = (d0, d1)
 
+p_start, p_end = period
 p_start_dt = pd.to_datetime(p_start)
 p_end_dt = pd.to_datetime(p_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+
 
 # ==========================================================
 # Aplicar filtros
@@ -245,7 +208,7 @@ if sel_types:
 else:
     f = f.iloc[0:0]
 
-# filtro por pessoas (regex com re.escape)
+# filtro por pessoas (regex seguro)
 if sel_people:
     patt = "|".join(re.escape(p.strip()) for p in sel_people if p and p.strip())
     if patt:
@@ -264,7 +227,7 @@ if f.empty:
 f["plot_start"] = f["start_date"].clip(lower=p_start_dt)
 f["plot_end"] = f["end_date"].clip(upper=p_end_dt)
 
-# Ordem cronológica (eixo Y)
+# ordem cronológica
 order = (
     f.groupby("label")["plot_start"]
     .min()
@@ -274,18 +237,30 @@ order = (
 )
 
 # Texto dentro da barra
-if show_status_in_bar and "status" in f.columns:
-    f["bar_text"] = f["assignee_names"].astype(str) + "  ·  " + f["status"].astype(str)
+if show_status:
+    # ícones leves (sem poluir)
+    status_icon = {
+        "CONCLUIDA": "✓",
+        "EM_ANDAMENTO": "…",
+        "AGUARDANDO_CONFIRMACAO": "⏳",
+        "PLANEJADA": "",
+        "CANCELADA": "✖",
+    }
+    f["bar_text"] = f.apply(
+        lambda r: (status_icon.get(safe_text(r.get("status")).upper(), "") + " " + safe_text(r.get("assignee_names"))).strip(),
+        axis=1,
+    )
 else:
     f["bar_text"] = f["assignee_names"].astype(str)
 
 # ==========================================================
-# Cores (ADMINISTRATIVO bem diferente de CAMPO)
+# Cores
 # ==========================================================
+# CAMPO: verde escuro | RELATORIO: verde claro | ADMIN: azul acinzentado (bem distinto)
 color_map = {
     "CAMPO": "#1B5E20",
     "RELATORIO": "#66BB6A",
-    "ADMINISTRATIVO": "#1565C0",  # azul (diferencia claramente do verde de campo)
+    "ADMINISTRATIVO": "#2F6DAE",
 }
 
 # ==========================================================
@@ -304,7 +279,7 @@ fig = px.timeline(
         "title": True,
         "assignee_names": True,
         "tipo_atividade": True,
-        "status": True,  # sugestão de “visualizar status” sem poluir
+        "status": True,
         "start_date": True,
         "end_date": True,
         "label": False,
@@ -343,8 +318,10 @@ fig.update_xaxes(
     title_text="",
 )
 
-# fim de semana sombreado
+# Shapes: fim de semana + linha do hoje
 shapes = []
+
+# fim de semana sombreado
 for d in days:
     if d.weekday() >= 5:
         x0 = pd.to_datetime(d.date())
@@ -364,21 +341,22 @@ for d in days:
             )
         )
 
-# Linha do dia atual (hoje)
-today_dt = pd.to_datetime(today)
-shapes.append(
-    dict(
-        type="line",
-        xref="x",
-        yref="paper",
-        x0=today_dt,
-        x1=today_dt,
-        y0=0,
-        y1=1,
-        line=dict(color="rgba(220,0,0,0.75)", width=2),
-        layer="above",
+# linha do dia atual (se dentro do range)
+today_dt = pd.to_datetime(date.today())
+if p_start_dt <= today_dt <= p_end_dt:
+    shapes.append(
+        dict(
+            type="line",
+            xref="x",
+            yref="paper",
+            x0=today_dt,
+            x1=today_dt,
+            y0=0,
+            y1=1,
+            line=dict(color="rgba(220,0,0,0.75)", width=2),
+            layer="above",
+        )
     )
-)
 
 fig.update_layout(shapes=shapes)
 
@@ -398,5 +376,6 @@ with st.expander("Dados (opcional)"):
         use_container_width=True,
         hide_index=True,
     )
+
 
 
