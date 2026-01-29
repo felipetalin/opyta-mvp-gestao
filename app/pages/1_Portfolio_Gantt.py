@@ -1,7 +1,5 @@
-# app/pages/1_Portfolio_Gantt.py
-
 import re
-from datetime import date, timedelta, datetime
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -10,13 +8,13 @@ import streamlit as st
 from services.auth import require_login
 from services.supabase_client import get_authed_client
 
-# Branding / Chrome
-from ui.brand import apply_brand, apply_app_chrome, page_header
-from ui.layout import filter_bar_start
+# Branding / layout
+from ui.brand import apply_brand
+from ui.layout import apply_app_chrome, page_header, filter_bar_start
 
 
 # ==========================================================
-# Boot (ordem obrigatória)
+# Boot (ORDEM OBRIGATÓRIA)
 # ==========================================================
 st.set_page_config(page_title="Portfólio (Gantt)", layout="wide")
 apply_brand()
@@ -25,7 +23,11 @@ apply_app_chrome()
 require_login()
 sb = get_authed_client()
 
-page_header("Portfólio (Gantt)", "Filtros + cronograma", st.session_state.get("user_email", ""))
+page_header(
+    "Portfólio (Gantt)",
+    "Filtros + cronograma",
+    st.session_state.get("user_email", ""),
+)
 
 
 # ==========================================================
@@ -37,11 +39,10 @@ def month_range(d: date):
         nxt = first.replace(year=first.year + 1, month=1, day=1)
     else:
         nxt = first.replace(month=first.month + 1, day=1)
-    last = nxt - timedelta(days=1)
-    return first, last
+    return first, nxt - timedelta(days=1)
 
 
-def shift_month_first(d: date, delta: int) -> date:
+def shift_month(d: date, delta: int) -> date:
     y = d.year
     m = d.month + delta
     while m > 12:
@@ -54,112 +55,46 @@ def shift_month_first(d: date, delta: int) -> date:
 
 
 def month_label(d: date) -> str:
-    meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+    meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun",
+              "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
     return f"{meses[d.month-1]}/{d.year}"
 
 
-def pt_weekday_letter(d: date) -> str:
-    letters = ["S", "T", "Q", "Q", "S", "S", "D"]  # Mon..Sun
-    return letters[d.weekday()]
-
-
-def to_dt(x):
-    return pd.to_datetime(x, errors="coerce")
-
-
-def safe_text(x, default=""):
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return default
-    s = str(x).strip()
-    if s in ("None", "nan", "NaT"):
-        return default
-    return s
-
-
-def normalize_status(x):
-    return safe_text(x).upper().strip()
-
-
-def split_people(assignee_names):
-    out = []
-    for p in str(assignee_names or "").split("+"):
-        t = p.strip()
-        if t:
-            out.append(t)
-    return out
-
-
-def _api_error_message(e: Exception) -> str:
-    try:
-        if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
-            d = e.args[0]
-            msg = d.get("message") or str(d)
-            details = d.get("details")
-            hint = d.get("hint")
-            out = msg
-            if hint:
-                out += f"\nHint: {hint}"
-            if details:
-                out += f"\nDetalhes: {details}"
-            return out
-        return str(e)
-    except Exception:
-        return "Erro desconhecido."
+def weekday_letter(d: date) -> str:
+    return ["S", "T", "Q", "Q", "S", "S", "D"][d.weekday()]
 
 
 # ==========================================================
-# Load (view)
+# Load data
 # ==========================================================
 @st.cache_data(ttl=30)
-def fetch_portfolio_view():
+def load_portfolio():
     res = sb.table("v_portfolio_tasks").select("*").execute()
     return pd.DataFrame(res.data or [])
 
 
-df = fetch_portfolio_view()
-
+df = load_portfolio()
 if df.empty:
-    st.warning("Nenhuma tarefa encontrada na view v_portfolio_tasks.")
+    st.warning("Nenhuma tarefa encontrada.")
     st.stop()
 
-# Datas
-df["start_date"] = to_dt(df.get("start_date"))
-df["end_date"] = to_dt(df.get("end_date"))
-
-# Se end_date vazio, assume start_date
+# Normalização
+df["start_date"] = pd.to_datetime(df["start_date"], errors="coerce")
+df["end_date"] = pd.to_datetime(df["end_date"], errors="coerce")
 df["end_date"] = df["end_date"].fillna(df["start_date"])
-df = df.dropna(subset=["start_date", "end_date"]).copy()
-if df.empty:
-    st.warning("Existem registros, mas sem start_date/end_date válidos.")
-    st.stop()
+df = df.dropna(subset=["start_date", "end_date"])
 
-# Fallbacks esperados
-if "project_code" not in df.columns:
-    df["project_code"] = ""
-if "title" not in df.columns:
-    df["title"] = ""
-if "tipo_atividade" not in df.columns:
-    df["tipo_atividade"] = "CAMPO"
+# Campos esperados
+df["project_code"] = df.get("project_code", "").fillna("")
+df["title"] = df.get("title", "").fillna("")
+df["tipo_atividade"] = df.get("tipo_atividade", "CAMPO").fillna("CAMPO")
+df["assignee_names"] = df.get("assignee_names", "Profissional").fillna("Profissional")
+df["status"] = df.get("status", "").fillna("")
 
-# assignee_names (padrão novo). Se vier assignee_name antigo, converte.
-if "assignee_names" not in df.columns:
-    if "assignee_name" in df.columns:
-        df["assignee_names"] = df["assignee_name"].fillna("Profissional")
-    else:
-        df["assignee_names"] = "Profissional"
-df["assignee_names"] = df["assignee_names"].fillna("Profissional")
-
-# status (pode existir ou não)
-if "status" not in df.columns:
-    df["status"] = ""
-df["status"] = df["status"].fillna("")
-df["status_norm"] = df["status"].apply(normalize_status)
-
-# Label no eixo Y
 df["label"] = (
-    df["project_code"].astype(str).fillna("").str.strip()
+    df["project_code"].str.strip()
     + " | "
-    + df["title"].astype(str).fillna("").str.strip()
+    + df["title"].str.strip()
 ).str.strip(" |")
 
 
@@ -167,71 +102,69 @@ df["label"] = (
 # Filtros
 # ==========================================================
 today = date.today()
-d0, d1 = month_range(today)
 
-projects = ["Todos"] + sorted([p for p in df["project_code"].dropna().unique().tolist() if safe_text(p)])
-types_all = sorted([t for t in df["tipo_atividade"].dropna().unique().tolist() if safe_text(t)])
+projects = ["Todos"] + sorted(df["project_code"].unique().tolist())
+types_all = sorted(df["tipo_atividade"].unique().tolist())
 
-# Pessoas: assignee_names vem "A + B + C"
-people_set = set()
-for s in df["assignee_names"].dropna().astype(str).tolist():
-    for p in split_people(s):
-        people_set.add(p)
-people_all = sorted(people_set)
+people = set()
+for s in df["assignee_names"]:
+    for p in s.split("+"):
+        if p.strip():
+            people.add(p.strip())
+people_all = sorted(people)
 
-default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
+# Atalho de mês
+month_opts = []
+for d in [-2, -1, 0, 1, 2]:
+    md = shift_month(today, d)
+    m0, m1 = month_range(md)
+    month_opts.append((month_label(md), m0, m1))
 
-# Atalhos de período
-cur_first = shift_month_first(today, 0)
-prev_first = shift_month_first(today, -1)
-next_first = shift_month_first(today, 1)
-next2_first = shift_month_first(today, 2)
-
-cur_start, cur_end = month_range(cur_first)
-prev_start, _ = month_range(prev_first)
-_, next_end = month_range(next_first)
-_, next2_end = month_range(next2_first)
-
-period_presets = [
-    ("(manual)", None, None),
-    (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
-    (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
-    (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
-    (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
-]
-period_labels = [p[0] for p in period_presets]
-default_period_idx = 1 if len(period_labels) > 1 else 0
+month_labels = ["(manual)"] + [m[0] for m in month_opts]
 
 with filter_bar_start():
-    c1, c2, c3, c4, c5 = st.columns([1.2, 1.7, 2.2, 1.6, 1.3])
+    c1, c2, c3, c4, c5 = st.columns([1.2, 1.8, 2.2, 1.4, 1.2])
 
     with c1:
-        sel_project = st.selectbox("Projeto", projects, index=0)
+        sel_project = st.selectbox("Projeto", projects)
 
     with c2:
-        sel_types = st.multiselect("Tipo Atividade", types_all, default=default_types)
+        sel_types = st.multiselect(
+            "Tipo Atividade",
+            types_all,
+            default=types_all,
+        )
 
     with c3:
-        sel_people = st.multiselect("Profissionais", people_all, default=people_all)
+        sel_people = st.multiselect(
+            "Profissionais",
+            people_all,
+            default=people_all,
+        )
 
     with c4:
-        sel_period = st.selectbox("Atalho (período)", period_labels, index=default_period_idx)
+        sel_month = st.selectbox(
+            "Atalho (período)",
+            month_labels,
+            index=month_labels.index(month_label(today))
+            if month_label(today) in month_labels else 0,
+        )
 
     with c5:
-        show_status = st.toggle("Status na barra", value=False)
-        show_cancelled = st.toggle("Mostrar canceladas", value=True)
+        show_status = st.toggle("Status na barra", value=True)
 
-# Período final (preset ou manual)
-chosen = [p for p in period_presets if p[0] == sel_period][0]
-if chosen[0] != "(manual)":
-    p_start, p_end = chosen[1], chosen[2]
-    st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
+
+# Período
+if sel_month != "(manual)":
+    m = [x for x in month_opts if x[0] == sel_month][0]
+    p_start, p_end = m[1], m[2]
+    st.caption(f"Período: **{p_start:%d/%m/%Y} – {p_end:%d/%m/%Y}**")
 else:
-    period = st.date_input("Período (manual)", value=(d0, d1), format="DD/MM/YYYY")
-    if isinstance(period, tuple) and len(period) == 2:
-        p_start, p_end = period
-    else:
-        p_start, p_end = d0, d1
+    p_start, p_end = st.date_input(
+        "Período",
+        value=month_range(today),
+        format="DD/MM/YYYY",
+    )
 
 p_start_dt = pd.to_datetime(p_start)
 p_end_dt = pd.to_datetime(p_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
@@ -250,102 +183,69 @@ if sel_types:
 else:
     f = f.iloc[0:0]
 
-# filtro por pessoas (regex seguro)
 if sel_people:
-    patt = "|".join(re.escape(p.strip()) for p in sel_people if p and p.strip())
-    if patt:
-        f = f[f["assignee_names"].astype(str).str.contains(patt, regex=True, na=False)]
+    patt = "|".join(re.escape(p) for p in sel_people)
+    f = f[f["assignee_names"].str.contains(patt, regex=True)]
 else:
     f = f.iloc[0:0]
 
-# canceladas
-if not show_cancelled and "status_norm" in f.columns:
-    f = f[f["status_norm"] != "CANCELADA"]
-
-# interseção com janela
-f = f[(f["start_date"] <= p_end_dt) & (f["end_date"] >= p_start_dt)].copy()
+f = f[(f["start_date"] <= p_end_dt) & (f["end_date"] >= p_start_dt)]
 
 if f.empty:
-    st.info("Ainda não há tarefas no portfólio (ou os filtros zeraram a lista).")
+    st.info("Nenhuma tarefa para os filtros selecionados.")
     st.stop()
 
-# clamp visual
 f["plot_start"] = f["start_date"].clip(lower=p_start_dt)
 f["plot_end"] = f["end_date"].clip(upper=p_end_dt)
 
-# ordem cronológica
 order = (
     f.groupby("label")["plot_start"]
     .min()
-    .sort_values(ascending=True)
+    .sort_values()
     .index
     .tolist()
 )
 
-# Texto dentro da barra
-status_icon = {
-    "CONCLUIDA": "✓",
-    "EM_ANDAMENTO": "…",
-    "AGUARDANDO_CONFIRMACAO": "⏳",
-    "PLANEJADA": "",
-    "CANCELADA": "✖",
-}
+# Texto da barra
 if show_status:
+    icons = {
+        "CONCLUIDA": "✓",
+        "EM_ANDAMENTO": "…",
+        "AGUARDANDO_CONFIRMACAO": "⏳",
+        "CANCELADA": "✖",
+    }
     f["bar_text"] = f.apply(
-        lambda r: (status_icon.get(safe_text(r.get("status_norm")), "") + " " + safe_text(r.get("assignee_names"))).strip(),
+        lambda r: f"{icons.get(r['status'], '')} {r['assignee_names']}".strip(),
         axis=1,
     )
 else:
-    # só um hint leve para canceladas
-    f["bar_text"] = f.apply(
-        lambda r: (("✖ " if safe_text(r.get("status_norm")) == "CANCELADA" else "") + safe_text(r.get("assignee_names"))).strip(),
-        axis=1,
-    )
+    f["bar_text"] = f["assignee_names"]
 
-# Cor: admin diferente + cancelada cinza (se estiver visível)
-f["tipo_plot"] = f["tipo_atividade"].astype(str)
-if "status_norm" in f.columns:
-    f.loc[f["status_norm"] == "CANCELADA", "tipo_plot"] = "CANCELADA"
-
-color_map = {
-    "CAMPO": "#1B5E20",
-    "RELATORIO": "#66BB6A",
-    "ADMINISTRATIVO": "#2F6DAE",
-    "CANCELADA": "#9E9E9E",
-}
 
 # ==========================================================
 # Gantt
 # ==========================================================
+colors = {
+    "CAMPO": "#1B5E20",
+    "RELATORIO": "#66BB6A",
+    "ADMINISTRATIVO": "#2F6DAE",
+}
+
 fig = px.timeline(
     f,
     x_start="plot_start",
     x_end="plot_end",
     y="label",
-    color="tipo_plot",
-    color_discrete_map=color_map,
+    color="tipo_atividade",
+    color_discrete_map=colors,
     text="bar_text",
-    hover_data={
-        "project_code": True,
-        "title": True,
-        "assignee_names": True,
-        "tipo_atividade": True,
-        "status": True,
-        "start_date": True,
-        "end_date": True,
-        "label": False,
-        "plot_start": False,
-        "plot_end": False,
-        "tipo_plot": False,
-        "status_norm": False,
-    },
 )
 
 fig.update_yaxes(
     categoryorder="array",
     categoryarray=order,
-    title_text="Projeto / Tarefa",
     autorange="reversed",
+    title="Projeto / Tarefa",
 )
 
 fig.update_traces(
@@ -354,38 +254,28 @@ fig.update_traces(
     cliponaxis=False,
 )
 
-fig.update_xaxes(range=[p_start_dt, p_end_dt])
-
-# ticks diários
+# eixo X diário
 days = pd.date_range(p_start_dt.date(), p_end_dt.date(), freq="D")
-tickvals = [pd.to_datetime(d) for d in days]
-ticktext = [f"{pt_weekday_letter(d.date())} {d.day:02d}/{d.month:02d}" for d in days]
-
 fig.update_xaxes(
     tickmode="array",
-    tickvals=tickvals,
-    ticktext=ticktext,
+    tickvals=days,
+    ticktext=[f"{weekday_letter(d.date())} {d.day:02d}/{d.month:02d}" for d in days],
     tickangle=-90,
     showgrid=True,
-    gridcolor="rgba(0,0,0,0.06)",
-    title_text="",
+    gridcolor="rgba(0,0,0,0.05)",
 )
 
-# Shapes: fim de semana + linha do hoje
+# fim de semana + hoje
 shapes = []
-
-# fim de semana sombreado
 for d in days:
     if d.weekday() >= 5:
-        x0 = pd.to_datetime(d.date())
-        x1 = x0 + pd.Timedelta(days=1)
         shapes.append(
             dict(
                 type="rect",
                 xref="x",
                 yref="paper",
-                x0=x0,
-                x1=x1,
+                x0=d,
+                x1=d + pd.Timedelta(days=1),
                 y0=0,
                 y1=1,
                 fillcolor="rgba(102,187,106,0.10)",
@@ -394,8 +284,7 @@ for d in days:
             )
         )
 
-# linha do dia atual
-today_dt = pd.to_datetime(date.today())
+today_dt = pd.to_datetime(today)
 if p_start_dt <= today_dt <= p_end_dt:
     shapes.append(
         dict(
@@ -406,29 +295,19 @@ if p_start_dt <= today_dt <= p_end_dt:
             x1=today_dt,
             y0=0,
             y1=1,
-            line=dict(color="rgba(220,0,0,0.75)", width=2),
-            layer="above",
+            line=dict(color="red", width=2),
         )
     )
 
-fig.update_layout(shapes=shapes)
-
 fig.update_layout(
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, title_text=""),
+    shapes=shapes,
+    legend=dict(orientation="h", y=1.02, x=0.5, xanchor="center"),
     margin=dict(l=10, r=10, t=60, b=40),
+    height=max(420, 80 + f["label"].nunique() * 55),
 )
-
-row_count = f["label"].nunique()
-fig.update_layout(height=max(420, 80 + row_count * 55))
 
 st.plotly_chart(fig, use_container_width=True)
 
-with st.expander("Dados (opcional)"):
-    st.dataframe(
-        f.sort_values(["plot_start", "plot_end"], na_position="last"),
-        use_container_width=True,
-        hide_index=True,
-    )
 
 
 
