@@ -104,13 +104,17 @@ def _pct(curr: float, prev: float) -> str:
     arrow = "↑" if p >= 0 else "↓"
     return f"{arrow} {abs(p):.1f}%"
 
-
 # ==========================================================
 # Cache / fetchs
 # ==========================================================
 @st.cache_data(ttl=30)
 def fetch_projects():
-    res = sb.table("projects").select("id,project_code,name").order("project_code", desc=False).execute()
+    res = (
+        sb.table("projects")
+        .select("id,project_code,name")
+        .order("project_code", desc=False)
+        .execute()
+    )
     return pd.DataFrame(res.data or [])
 
 
@@ -148,13 +152,17 @@ def fetch_transactions_view(
     category_id: str | None,
     counterparty_id: str | None,
 ):
+    """
+    IMPORTANTE:
+    - Não usar v_finance_transactions aqui, porque ela está retornando NULL/None.
+    - Busca direto da tabela real finance_transactions (fonte de verdade).
+    - Mantém a assinatura para não quebrar o restante do arquivo.
+    """
     q = (
-        sb.from_("v_finance_transactions")
+        sb.table("finance_transactions")
         .select(
             "id,date,type,status,description,amount,"
-            "category_id,category_name,"
-            "counterparty_id,counterparty_name,"
-            "project_id,project_code,project_name,"
+            "category_id,counterparty_id,project_id,"
             "payment_method,competence_month,notes,created_by"
         )
         .gte("date", date_from.isoformat())
@@ -174,7 +182,28 @@ def fetch_transactions_view(
         q = q.eq("counterparty_id", counterparty_id)
 
     res = q.execute()
-    return pd.DataFrame(res.data or [])
+    df = pd.DataFrame(res.data or [])
+
+    # Garantia: colunas sempre presentes (evita KeyError / editor mostrar None estranho)
+    for c in [
+        "id",
+        "date",
+        "type",
+        "status",
+        "description",
+        "amount",
+        "category_id",
+        "counterparty_id",
+        "project_id",
+        "payment_method",
+        "competence_month",
+        "notes",
+        "created_by",
+    ]:
+        if c not in df.columns:
+            df[c] = None
+
+    return df
 
 
 def insert_tx(payload: dict):
