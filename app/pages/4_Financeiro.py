@@ -35,19 +35,16 @@ apply_app_chrome()
 require_login()
 sb = get_authed_client()
 
-user_email = (st.session_state.get("user_email") or "").strip().lower()
-page_header("Financeiro", "Dashboard + inserir lançamentos (sem editar/excluir)", user_email)
-
 # ==========================================================
 # Acesso restrito (Felipe + Yuri)
 # ==========================================================
-ALLOWED_FINANCE_EMAILS = {
-    "felipetalin@opyta.com.br",
-    "yurisimoes@opyta.com.br",
-}
-if user_email not in {e.lower() for e in ALLOWED_FINANCE_EMAILS}:
-    st.info("Módulo em implantação (desativado). Em breve.")
-    st.stop()
+
+from services.finance_guard import require_finance_access
+
+user_email = require_finance_access()
+page_header("Financeiro", "Dashboard + inserir lançamentos (sem editar/excluir)", user_email)
+
+
 
 # ==========================================================
 # Helpers
