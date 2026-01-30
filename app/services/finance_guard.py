@@ -1,27 +1,29 @@
-from __future__ import annotations
-
 import streamlit as st
 
-# Somente essas contas podem acessar o Financeiro
-ALLOWED_FINANCE_EMAILS = {
-    "felipetalin@opyta.com.br",
-    "yurisimoes@opyta.com.br",
+_ALLOWED = {
+    "felipetalin@opyta.com.br": {"read": True, "write": True},
+    "yurisimoes@opyta.com.br": {"read": True, "write": False},
 }
 
-
-def require_finance_access(*, silent: bool = True) -> str:
+def require_finance_access(silent: bool = True) -> str:
     """
-    Se silent=True:
-        - usuários não autorizados NÃO veem nada (página vazia)
-    Retorna o email normalizado (lower) se autorizado.
+    Permite acesso ao Financeiro só para usuários autorizados.
+    Retorna o email do usuário.
+    Se silent=True, não mostra erro constrangedor: só interrompe.
     """
-    user_email = (st.session_state.get("user_email") or "").strip().lower()
+    email = (st.session_state.get("user_email") or "").strip().lower()
 
-    allowed = {e.strip().lower() for e in ALLOWED_FINANCE_EMAILS}
-    if not user_email or user_email not in allowed:
-        if silent:
-            st.stop()  # encerra sem mensagem
-        st.info("Módulo Financeiro restrito.")
+    if email in _ALLOWED and _ALLOWED[email].get("read"):
+        return email
+
+    # Não autorizado
+    if silent:
+        # não mostra nada: interrompe a página
         st.stop()
 
-    return user_email
+    st.error("Acesso restrito ao Financeiro.")
+    st.stop()
+
+def can_finance_write(user_email: str) -> bool:
+    email = (user_email or "").strip().lower()
+    return bool(_ALLOWED.get(email, {}).get("write", False))

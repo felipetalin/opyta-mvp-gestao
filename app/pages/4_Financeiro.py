@@ -7,6 +7,7 @@ import streamlit as st
 from services.auth import require_login
 from services.supabase_client import get_authed_client
 from services.finance_guard import require_finance_access
+from services.finance_guard import require_finance_access, can_finance_write
 
 # Branding (não pode quebrar o app se faltar algo)
 try:
@@ -37,6 +38,13 @@ sb = get_authed_client()
 
 # 🔒 Acesso silencioso (para não constranger)
 user_email = require_finance_access(silent=True)
+can_write = can_finance_write(user_email)
+if can_write:
+    # ... (seu bloco inteiro de Novo lançamento)
+else:
+    st.subheader("Novo lançamento")
+    st.caption("Somente leitura para seu perfil. (Solicite ao Felipe para inserir.)")
+
 
 page_header("Financeiro", "Dashboard + inserir lançamentos (sem editar/excluir)", user_email)
 
