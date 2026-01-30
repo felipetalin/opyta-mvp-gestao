@@ -883,6 +883,8 @@ with st.container(border=True):
             except Exception as e:
                 st.error("Erro ao salvar lançamento:")
                 st.code(_api_error_message(e))
+                st.divider()
+
 # ==========================================================
 # LISTA (EDIÇÃO INLINE + EXCLUSÃO)
 # ==========================================================
