@@ -786,10 +786,10 @@ with st.container(border=True):
 st.divider()
 
 # ==========================================================
-# LISTA (EDIÇÃO INLINE + EXCLUSÃO)
+# LISTA (EDIÇÃO INLINE + EXCLUSÃO com confirmação)
 # ==========================================================
 st.subheader("Lançamentos (edição inline)")
-st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Exclua com confirmação.")
+st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Para excluir, marque a caixa e confirme.")
 
 try:
     df = fetch_transactions_view(
@@ -810,6 +810,9 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
+# -------------------------
+# Normalização
+# -------------------------
 df2 = df.copy()
 df2["id"] = df2["id"].astype(str)
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
@@ -819,74 +822,136 @@ for col in ["description", "payment_method", "notes"]:
     if col in df2.columns:
         df2[col] = df2[col].apply(_clean_str)
 
-# Maps id -> label para dropdowns no editor
+# -------------------------
+# Options (editor) + placeholders para evitar "None"
+# -------------------------
+CAT_NONE = "(Sem)"
+CP_NONE = "(Sem)"
+PROJ_NONE = "(Sem)"
+
+# remove o "(Todas)/(Todos)" da lista editável e adiciona "(Sem)"
+cat_options_editor = [CAT_NONE] + [k for k in cat_map.keys() if k != "(Todas)"]
+cp_options_editor = [CP_NONE] + [k for k in cp_map.keys() if k != "(Todas)"]
+proj_options_editor = [PROJ_NONE] + [k for k in proj_map.keys() if k != "(Todos)"]
+
+# Map id -> label
 cat_label_by_id = {v: k for k, v in cat_map.items() if v}
 cp_label_by_id = {v: k for k, v in cp_map.items() if v}
 proj_label_by_id = {v: k for k, v in proj_map.items() if v}
 
+# -------------------------
+# DataFrame editável (id como index)
+# Excluir? como PRIMEIRA coluna
+# -------------------------
 df_edit = pd.DataFrame(
     {
-        "Data": df2["date"],
-        "Tipo": df2["type"],
-        "Status": df2["status"],
-        "Descrição": df2["description"],
-        "Categoria": df2["category_id"].map(cat_label_by_id),
-        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id),
-        "Projeto": df2["project_id"].map(proj_label_by_id),
-        "Valor": df2["amount"],
-        "Pagamento": df2.get("payment_method", ""),
-        "Obs": df2.get("notes", ""),
         "Excluir?": False,
+        "Data": df2["date"],
+        "Tipo": df2["type"].astype(str),
+        "Status": df2["status"].astype(str),
+        "Descrição": df2["description"],
+        "Categoria": df2["category_id"].map(cat_label_by_id).fillna(CAT_NONE),
+        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(CP_NONE),
+        "Projeto": df2["project_id"].map(proj_label_by_id).fillna(PROJ_NONE),
+        "Valor": df2["amount"],
+        "Pagamento": df2.get("payment_method", "").apply(_clean_str),
+        "Obs": df2.get("notes", "").apply(_clean_str),
     },
     index=df2["id"],
 )
 
+# Mantém a seleção de exclusão entre reruns (opcional, mas ajuda)
+if "finance_editor_df" not in st.session_state:
+    st.session_state["finance_editor_df"] = df_edit.copy()
+
 edited = st.data_editor(
-    df_edit,
+    st.session_state["finance_editor_df"],
+    key="finance_editor",
     use_container_width=True,
     hide_index=True,
     num_rows="fixed",
+    column_order=[
+        "Excluir?",
+        "Data",
+        "Tipo",
+        "Status",
+        "Descrição",
+        "Categoria",
+        "Cliente/Fornecedor",
+        "Projeto",
+        "Valor",
+        "Pagamento",
+        "Obs",
+    ],
     column_config={
-        "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
-        "Tipo": st.column_config.SelectboxColumn(options=TYPE_OPTIONS),
-        "Status": st.column_config.SelectboxColumn(options=STATUS_OPTIONS),
-        "Categoria": st.column_config.SelectboxColumn(options=list(cat_map.keys())),
-        "Cliente/Fornecedor": st.column_config.SelectboxColumn(options=list(cp_map.keys())),
-        "Projeto": st.column_config.SelectboxColumn(options=list(proj_map.keys())),
-        "Valor": st.column_config.NumberColumn(min_value=0.01, step=10.0),
+        "Excluir?": st.column_config.CheckboxColumn(width="small"),
+        "Data": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Tipo": st.column_config.SelectboxColumn(options=TYPE_OPTIONS, width="small"),
+        "Status": st.column_config.SelectboxColumn(options=STATUS_OPTIONS, width="small"),
+        "Categoria": st.column_config.SelectboxColumn(options=cat_options_editor),
+        "Cliente/Fornecedor": st.column_config.SelectboxColumn(options=cp_options_editor),
+        "Projeto": st.column_config.SelectboxColumn(options=proj_options_editor),
+        "Valor": st.column_config.NumberColumn(min_value=0.01, step=10.0, width="small"),
         "Descrição": st.column_config.TextColumn(width="large"),
         "Obs": st.column_config.TextColumn(width="large"),
-        "Excluir?": st.column_config.CheckboxColumn(),
     },
 )
 
-c1, c2 = st.columns([1, 1])
+# Atualiza estado com a edição atual
+st.session_state["finance_editor_df"] = edited.copy()
+
+c1, c2, c3 = st.columns([1, 1, 2])
 save_btn = c1.button("Salvar alterações", type="primary")
 reload_btn = c2.button("Recarregar lançamentos")
 
 if reload_btn:
+    # limpa e recarrega (e reseta editor)
     clear_caches()
+    st.session_state.pop("finance_editor_df", None)
     st.rerun()
+
+# -------------------------
+# Confirmação de exclusão em 2 etapas
+# -------------------------
+if "finance_confirm_delete" not in st.session_state:
+    st.session_state["finance_confirm_delete"] = False
 
 if save_btn:
     before = df_edit.copy()
     after = edited.copy()
 
+    # quais IDs estão marcados pra excluir?
+    delete_ids = [tx_id for tx_id, row in after.iterrows() if bool(row.get("Excluir?", False))]
+
+    # Se tem exclusão, pede confirmação (2ª etapa)
+    if delete_ids and not st.session_state["finance_confirm_delete"]:
+        st.session_state["finance_confirm_delete"] = True
+        st.warning(
+            f"Você marcou **{len(delete_ids)}** lançamento(s) para excluir. "
+            "Clique em **Confirmar exclusões** para apagar de verdade."
+        )
+        st.stop()
+
+    # Se não tem exclusão, ou já confirmou, segue
     n_updates = 0
     n_deletes = 0
     warnings: list[str] = []
 
-    for tx_id, ra in after.iterrows():
-        rb = before.loc[tx_id]
-
-        # Exclusão
-        if ra["Excluir?"] is True:
+    # Executa deleções confirmadas
+    if st.session_state["finance_confirm_delete"] and delete_ids:
+        for tx_id in delete_ids:
             try:
                 sb.table("finance_transactions").delete().eq("id", tx_id).execute()
                 n_deletes += 1
             except Exception as e:
                 warnings.append(f"Erro ao excluir {tx_id}: {_api_error_message(e)}")
+
+    # Executa updates (somente itens NÃO excluídos)
+    for tx_id, ra in after.iterrows():
+        if tx_id in delete_ids:
             continue
+
+        rb = before.loc[tx_id]
 
         # Mudou algo?
         changed = False
@@ -916,9 +981,9 @@ if save_btn:
             "status": ra["Status"],
             "description": norm(ra["Descrição"]),
             "amount": float(ra["Valor"]),
-            "category_id": cat_map.get(ra["Categoria"]),
-            "counterparty_id": cp_map.get(ra["Cliente/Fornecedor"]),
-            "project_id": proj_map.get(ra["Projeto"]),
+            "category_id": None if ra["Categoria"] == CAT_NONE else cat_map.get(ra["Categoria"]),
+            "counterparty_id": None if ra["Cliente/Fornecedor"] == CP_NONE else cp_map.get(ra["Cliente/Fornecedor"]),
+            "project_id": None if ra["Projeto"] == PROJ_NONE else proj_map.get(ra["Projeto"]),
             "payment_method": norm(ra["Pagamento"]) or None,
             "notes": norm(ra["Obs"]) or None,
         }
@@ -929,10 +994,32 @@ if save_btn:
         except Exception as e:
             warnings.append(f"Erro ao atualizar {tx_id}: {_api_error_message(e)}")
 
+    # Limpa flag de confirmação
+    st.session_state["finance_confirm_delete"] = False
+
     if warnings:
         st.warning("\n".join(warnings))
 
     st.success(f"Atualizados: {n_updates} • Excluídos: {n_deletes}")
     clear_caches()
+    st.session_state.pop("finance_editor_df", None)
     st.rerun()
 
+# Botão explícito da 2ª etapa (aparece só se tiver pendente)
+if st.session_state.get("finance_confirm_delete", False):
+    confirm = st.button("Confirmar exclusões", type="secondary")
+    cancel = st.button("Cancelar exclusões", type="tertiary")
+
+    if cancel:
+        st.session_state["finance_confirm_delete"] = False
+        # desmarca as exclusões no editor (para não ficar armadilha)
+        df_tmp = st.session_state["finance_editor_df"].copy()
+        if "Excluir?" in df_tmp.columns:
+            df_tmp["Excluir?"] = False
+        st.session_state["finance_editor_df"] = df_tmp
+        st.rerun()
+
+    if confirm:
+        # dispara o fluxo de save de novo já confirmando
+        # (apenas seta e rerun; o save acontecerá ao clicar "Salvar alterações" novamente)
+        st.info("Agora clique em **Salvar alterações** para aplicar as exclusões confirmadas.")
