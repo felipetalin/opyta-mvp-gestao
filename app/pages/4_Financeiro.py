@@ -885,10 +885,11 @@ with st.container(border=True):
                 st.code(_api_error_message(e))
 
 # ==========================================================
-# LISTA (somente leitura)
+# LISTA (EDIÇÃO INLINE + EXCLUSÃO)
 # ==========================================================
 st.divider()
-st.subheader("Lançamentos (somente leitura)")
+st.subheader("Lançamentos (edição inline)")
+st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Exclua com confirmação.")
 
 try:
     df = fetch_transactions_view(
@@ -909,42 +910,127 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
+# =========================
+# Normalização
+# =========================
 df2 = df.copy()
+df2["id"] = df2["id"].astype(str)
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
 df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
 
-for col in ["description", "category_name", "counterparty_name", "project_code", "payment_method", "notes"]:
+for col in [
+    "description",
+    "payment_method",
+    "notes",
+]:
     if col in df2.columns:
         df2[col] = df2[col].apply(_clean_str)
 
-if "status" in df2.columns:
-    df2["status"] = df2["status"].apply(_status_badge_text)
+# =========================
+# Mapeamentos (dropdowns)
+# =========================
+status_options = STATUS_OPTIONS
+type_options = TYPE_OPTIONS
 
-show = pd.DataFrame(
+cat_label_by_id = {v: k for k, v in cat_map.items() if v}
+cp_label_by_id = {v: k for k, v in cp_map.items() if v}
+proj_label_by_id = {v: k for k, v in proj_map.items() if v}
+
+# =========================
+# DataFrame editável (index = id)
+# =========================
+df_edit = pd.DataFrame(
     {
         "Data": df2["date"],
-        "Tipo": df2["type"].apply(_clean_str),
-        "Status": df2["status"].apply(_clean_str),
+        "Tipo": df2["type"],
+        "Status": df2["status"],
         "Descrição": df2["description"],
-        "Categoria": df2.get("category_name", "").apply(_clean_str),
-        "Cliente/Fornecedor": df2.get("counterparty_name", "").apply(_clean_str),
-        "Projeto": df2.get("project_code", "").apply(_clean_str),
-        "Valor (R$)": df2["amount"].apply(lambda v: _brl(float(v))),
-        "Pagamento": df2.get("payment_method", "").apply(_clean_str),
-        "Obs": df2.get("notes", "").apply(_clean_str),
-    }
+        "Categoria": df2["category_id"].map(cat_label_by_id),
+        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id),
+        "Projeto": df2["project_id"].map(proj_label_by_id),
+        "Valor": df2["amount"],
+        "Pagamento": df2.get("payment_method", ""),
+        "Obs": df2.get("notes", ""),
+        "Excluir?": False,
+    },
+    index=df2["id"],
 )
 
-st.dataframe(
-    show,
+edited = st.data_editor(
+    df_edit,
     use_container_width=True,
     hide_index=True,
+    num_rows="fixed",
     column_config={
         "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
-        "Valor (R$)": st.column_config.TextColumn(width="small"),
+        "Tipo": st.column_config.SelectboxColumn(options=type_options),
+        "Status": st.column_config.SelectboxColumn(options=status_options),
+        "Categoria": st.column_config.SelectboxColumn(options=list(cat_map.keys())),
+        "Cliente/Fornecedor": st.column_config.SelectboxColumn(options=list(cp_map.keys())),
+        "Projeto": st.column_config.SelectboxColumn(options=list(proj_map.keys())),
+        "Valor": st.column_config.NumberColumn(min_value=0.01, step=10.0),
         "Descrição": st.column_config.TextColumn(width="large"),
         "Obs": st.column_config.TextColumn(width="large"),
+        "Excluir?": st.column_config.CheckboxColumn(),
     },
 )
 
+c1, c2 = st.columns([1, 1])
+save_btn = c1.button("Salvar alterações", type="primary")
+reload_btn = c2.button("Recarregar")
+
+if reload_btn:
+    clear_caches()
+    st.rerun()
+
+# =========================
+# SALVAR / EXCLUIR
+# =========================
+if save_btn:
+    before = df_edit.copy()
+    after = edited.copy()
+
+    n_updates = 0
+    n_deletes = 0
+
+    for tx_id, ra in after.iterrows():
+        rb = before.loc[tx_id]
+
+        # Exclusão
+        if ra["Excluir?"] is True:
+            sb.table("finance_transactions").delete().eq("id", tx_id).execute()
+            n_deletes += 1
+            continue
+
+        # Verifica mudança
+        changed = False
+        for c in before.columns:
+            if c == "Excluir?":
+                continue
+            if norm(rb[c]) != norm(ra[c]):
+                changed = True
+                break
+
+        if not changed:
+            continue
+
+        payload = {
+            "date": ra["Data"].isoformat() if ra["Data"] else None,
+            "type": ra["Tipo"],
+            "status": ra["Status"],
+            "description": norm(ra["Descrição"]),
+            "amount": float(ra["Valor"]),
+            "category_id": cat_map.get(ra["Categoria"]),
+            "counterparty_id": cp_map.get(ra["Cliente/Fornecedor"]),
+            "project_id": proj_map.get(ra["Projeto"]),
+            "payment_method": norm(ra["Pagamento"]) or None,
+            "notes": norm(ra["Obs"]) or None,
+        }
+
+        sb.table("finance_transactions").update(payload).eq("id", tx_id).execute()
+        n_updates += 1
+
+    st.success(f"Atualizados: {n_updates} • Excluídos: {n_deletes}")
+    clear_caches()
+    st.rerun()
 
