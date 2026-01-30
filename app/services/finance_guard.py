@@ -2,27 +2,25 @@ from __future__ import annotations
 
 import streamlit as st
 
-# Somente essas contas podem acessar o Financeiro
 ALLOWED_FINANCE_EMAILS = {
     "felipetalin@opyta.com.br",
     "yurisimoes@opyta.com.br",
 }
 
 
-def require_finance_access() -> str:
+def require_finance_access(silent: bool = True) -> str | None:
     """
-    Bloqueia acesso ao Financeiro para qualquer usuário que não esteja na whitelist.
-    Retorna o email normalizado (lower).
+    Se silent=True:
+      - usuários não autorizados NÃO veem nada (página vazia)
+    Retorna email se autorizado, senão None.
     """
     user_email = (st.session_state.get("user_email") or "").strip().lower()
 
-    # se por algum motivo não tiver email, bloqueia
-    if not user_email:
-        st.info("Módulo Financeiro restrito.")
-        st.stop()
-
-    if user_email not in {e.lower() for e in ALLOWED_FINANCE_EMAILS}:
-        st.info("Módulo Financeiro restrito.")
-        st.stop()
+    if not user_email or user_email not in {e.lower() for e in ALLOWED_FINANCE_EMAILS}:
+        if silent:
+            st.stop()  # mata a página sem mensagem
+        else:
+            st.info("Módulo Financeiro restrito.")
+            st.stop()
 
     return user_email

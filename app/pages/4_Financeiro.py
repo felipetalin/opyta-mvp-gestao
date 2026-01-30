@@ -1,3 +1,8 @@
+from services.finance_guard import require_finance_access
+
+user_email = require_finance_access(silent=True)
+
+
 from __future__ import annotations
 
 from datetime import date
