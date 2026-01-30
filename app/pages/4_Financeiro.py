@@ -150,6 +150,9 @@ def fetch_transactions_view(
 ):
     q = (
         sb.from_("v_finance_transactions")
+        st.write("debug rows:", len(df))
+st.write(df.head(3))
+
         .select(
             "id,date,type,status,description,amount,"
             "category_id,category_name,"
