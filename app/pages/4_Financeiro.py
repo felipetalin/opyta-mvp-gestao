@@ -253,12 +253,86 @@ if not txm.empty:
 saldo_real = receita_real - despesa_real
 saldo_proj = (receita_real + receita_prev) - (despesa_real + despesa_prev)
 
-c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
-c1.metric("Receita (real) 🟢", _brl(receita_real))
-c2.metric("Despesa (real) 🔴", _brl(despesa_real))
-c3.metric("Saldo (real) ⚪", _brl(saldo_real))
-c4.metric("Receita (prev) 🟡", _brl(receita_prev))
-c5.metric("Saldo (proj) 🟠", _brl(saldo_proj))
+# =========================
+# CARDS COLORIDOS (UX)
+# =========================
+# contagens (baseado no mês selecionado)
+n_receber = 0
+n_pagar = 0
+if not txm.empty:
+    n_receber = int(((txm["type"] == "RECEITA") & (txm["status"] == "PREVISTO")).sum())
+    n_pagar = int(((txm["type"] == "DESPESA") & (txm["status"] == "PREVISTO")).sum())
+
+saldo_atual = saldo_real
+receitas_previstas = receita_prev
+despesas_previstas = despesa_prev
+saldo_projetado = (saldo_real + receita_prev) - despesa_prev  # saldo atual + receitas prev - despesas prev
+
+# CSS (uma vez só)
+st.markdown(
+    """
+<style>
+.op-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 8px; }
+.op-card {
+  border-radius: 10px;
+  padding: 14px 16px;
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(0,0,0,.12);
+  border: 1px solid rgba(255,255,255,.12);
+  position: relative;
+  min-height: 92px;
+}
+.op-title { font-size: 14px; font-weight: 600; opacity: .95; margin-bottom: 4px; }
+.op-value { font-size: 30px; font-weight: 800; line-height: 1.05; margin: 0; }
+.op-sub   { font-size: 12px; opacity: .9; margin-top: 6px; }
+.op-green  { background: linear-gradient(135deg, #2f7d55 0%, #3e9a6b 100%); }
+.op-blue   { background: linear-gradient(135deg, #1e5aa7 0%, #2d79d3 100%); }
+.op-orange { background: linear-gradient(135deg, #c66b10 0%, #f39a2a 100%); }
+.op-red    { background: linear-gradient(135deg, #a11e1e 0%, #e04a4a 100%); }
+
+@media (max-width: 1100px) {
+  .op-cards { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 650px) {
+  .op-cards { grid-template-columns: 1fr; }
+}
+</style>
+""",
+    unsafe_allow_html=True,
+)
+
+# HTML dos cards
+st.markdown(
+    f"""
+<div class="op-cards">
+  <div class="op-card op-green">
+    <div class="op-title">Saldo Atual</div>
+    <div class="op-value">{_brl(saldo_atual)}</div>
+    <div class="op-sub">Saldo real do mês selecionado</div>
+  </div>
+
+  <div class="op-card op-blue">
+    <div class="op-title">Receitas Previstas</div>
+    <div class="op-value">{_brl(receitas_previstas)}</div>
+    <div class="op-sub">{n_receber} a receber</div>
+  </div>
+
+  <div class="op-card op-orange">
+    <div class="op-title">Despesas Previstas</div>
+    <div class="op-value">{_brl(despesas_previstas)}</div>
+    <div class="op-sub">{n_pagar} a pagar</div>
+  </div>
+
+  <div class="op-card op-red">
+    <div class="op-title">Saldo Projetado</div>
+    <div class="op-value">{_brl(saldo_projetado)}</div>
+    <div class="op-sub">Saldo atual + receitas previstas − despesas previstas</div>
+  </div>
+</div>
+""",
+    unsafe_allow_html=True,
+)
+
 
 st.divider()
 
