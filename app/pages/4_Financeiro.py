@@ -24,8 +24,8 @@ except Exception:
             st.caption(f"Logado como: {user_email}")
 
 
-from finance.access import finance_guard
-from finance.data import (
+from app.finance.access import finance_guard
+from app.finance.data import (
     set_sb,
     norm,
     api_error_message,
@@ -36,7 +36,8 @@ from finance.data import (
     insert_transaction,
     clear_finance_caches,
 )
-from finance.dashboard import render_dashboard
+from app.finance.dashboard import render_dashboard
+
 
 
 # ==========================================================

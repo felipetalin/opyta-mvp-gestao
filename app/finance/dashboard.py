@@ -4,7 +4,8 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
-from finance.data import fetch_monthly_summary, fetch_tx_min, fetch_receivables, fetch_payables
+from app.finance.data import fetch_monthly_summary, fetch_tx_min, fetch_receivables, fetch_payables
+
 
 
 def _brl(v: float) -> str:
