@@ -177,20 +177,21 @@ people_all = sorted(people_set)
 
 default_types = [t for t in ["CAMPO", "RELATORIO", "ADMINISTRATIVO"] if t in types_all] or types_all
 
-# Atalhos de período (inclui 2/3 meses e mês anterior+atual)
+# Atalhos de período (inclui 2/3 meses, mês anterior+atual e ✅ próximo mês)
 cur_first = shift_month_first(today, 0)
-prev_first = shift_month_first(today, -1)
 next_first = shift_month_first(today, 1)
+prev_first = shift_month_first(today, -1)
 next2_first = shift_month_first(today, 2)
 
 cur_start, cur_end = month_range(cur_first)
+next_start, next_end = month_range(next_first)
 prev_start, _ = month_range(prev_first)
-_, next_end = month_range(next_first)
 _, next2_end = month_range(next2_first)
 
 period_presets = [
     ("(manual)", None, None),
     (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
+    (f"Próximo mês ({month_label(next_first)})", next_start, next_end),
     (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
     (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
     (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
@@ -431,8 +432,6 @@ with st.expander("Dados (opcional)"):
         use_container_width=True,
         hide_index=True,
     )
-
-
 
 
 
