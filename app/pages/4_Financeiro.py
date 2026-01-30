@@ -348,37 +348,90 @@ receitas_previstas = receita_prev
 despesas_previstas = despesa_prev
 saldo_projetado = (saldo_real + receita_prev) - despesa_prev  # saldo atual + receitas prev - despesas prev
 
-# CARDS (HTML)
+# =========================
+# COMPARAÇÃO MÊS ANTERIOR
+# =========================
+def _prev_month(d: date) -> date:
+    if d.month == 1:
+        return date(d.year - 1, 12, 1)
+    return date(d.year, d.month - 1, 1)
+
+def _pct(curr: float, prev: float) -> str:
+    if prev == 0:
+        return "—"
+    p = ((curr - prev) / abs(prev)) * 100
+    arrow = "↑" if p >= 0 else "↓"
+    return f"{arrow} {abs(p):.1f}%"
+
+# mês atual
+m_from, m_to = month_range(sel_month)
+txm = fetch_tx_min(m_from, m_to)
+
+def _calc_month(tx: pd.DataFrame):
+    r_real = d_real = r_prev = d_prev = 0.0
+    if not tx.empty:
+        t = tx.copy()
+        t["type"] = t["type"].astype(str).str.upper()
+        t["status"] = t["status"].astype(str).str.upper()
+        t["amount"] = pd.to_numeric(t["amount"], errors="coerce").fillna(0.0)
+        r_real = float(t[(t["type"]=="RECEITA")&(t["status"]=="REALIZADO")]["amount"].sum())
+        d_real = float(t[(t["type"]=="DESPESA")&(t["status"]=="REALIZADO")]["amount"].sum())
+        r_prev = float(t[(t["type"]=="RECEITA")&(t["status"]=="PREVISTO")]["amount"].sum())
+        d_prev = float(t[(t["type"]=="DESPESA")&(t["status"]=="PREVISTO")]["amount"].sum())
+    return {
+        "saldo": r_real - d_real,
+        "r_prev": r_prev,
+        "d_prev": d_prev,
+    }
+
+curr = _calc_month(txm)
+
+# mês anterior
+pm = _prev_month(sel_month)
+pm_from, pm_to = month_range(pm)
+txm_prev = fetch_tx_min(pm_from, pm_to)
+prev = _calc_month(txm_prev)
+
+saldo_delta = _pct(curr["saldo"], prev["saldo"])
+rprev_delta = _pct(curr["r_prev"], prev["r_prev"])
+dprev_delta = _pct(curr["d_prev"], prev["d_prev"])
+
+saldo_projetado = (curr["saldo"] + curr["r_prev"]) - curr["d_prev"]
+
+# =========================
+# CARDS (HTML) COM COMPARAÇÃO
+# =========================
 st.markdown(
     f"""
 <div class="op-cards">
   <div class="op-card op-green">
     <div class="op-title">Saldo Atual</div>
-    <div class="op-value">{_brl(saldo_atual)}</div>
-    <div class="op-sub">Saldo real do mês selecionado</div>
+    <div class="op-value">{_brl(curr["saldo"])}</div>
+    <div class="op-sub">{saldo_delta} vs mês anterior</div>
   </div>
 
   <div class="op-card op-blue">
     <div class="op-title">Receitas Previstas</div>
-    <div class="op-value">{_brl(receitas_previstas)}</div>
-    <div class="op-sub">{n_receber} a receber</div>
+    <div class="op-value">{_brl(curr["r_prev"])}</div>
+    <div class="op-sub">{rprev_delta} vs mês anterior</div>
   </div>
 
   <div class="op-card op-orange">
     <div class="op-title">Despesas Previstas</div>
-    <div class="op-value">{_brl(despesas_previstas)}</div>
-    <div class="op-sub">{n_pagar} a pagar</div>
+    <div class="op-value">{_brl(curr["d_prev"])}</div>
+    <div class="op-sub">{dprev_delta} vs mês anterior</div>
   </div>
 
   <div class="op-card op-red">
     <div class="op-title">Saldo Projetado</div>
     <div class="op-value">{_brl(saldo_projetado)}</div>
-    <div class="op-sub">Saldo atual + receitas previstas − despesas previstas</div>
+    <div class="op-sub">Atual + previstas</div>
   </div>
 </div>
 """,
     unsafe_allow_html=True,
 )
+
 
 st.divider()
 
