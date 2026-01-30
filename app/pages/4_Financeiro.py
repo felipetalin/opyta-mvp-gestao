@@ -1,8 +1,3 @@
-from services.finance_guard import require_finance_access
-
-user_email = require_finance_access(silent=True)
-
-
 from __future__ import annotations
 
 from datetime import date
@@ -11,6 +6,7 @@ import streamlit as st
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
+from services.finance_guard import require_finance_access
 
 # Branding (não pode quebrar o app se faltar algo)
 try:
@@ -22,7 +18,6 @@ except Exception:
         return
 
     def page_header(title, subtitle, user_email=""):  # type: ignore
-        st.caption("FINANCE PAGE VERSION: 170476b (dashboard.py UX)")
         st.title(title)
         if subtitle:
             st.caption(subtitle)
@@ -40,20 +35,11 @@ apply_app_chrome()
 require_login()
 sb = get_authed_client()
 
-# ==========================================================
-# Acesso restrito (Felipe + Yuri)
-# ==========================================================
+# 🔒 Acesso silencioso (para não constranger)
+user_email = require_finance_access(silent=True)
 
-from services.finance_guard import require_finance_access
-
-user_email = require_finance_access()
 page_header("Financeiro", "Dashboard + inserir lançamentos (sem editar/excluir)", user_email)
 
-
-
-# ==========================================================
-# Helpers
-# ==========================================================
 TYPE_OPTIONS = ["RECEITA", "DESPESA", "TRANSFERENCIA"]
 STATUS_OPTIONS = ["PREVISTO", "REALIZADO", "CANCELADO"]
 today = date.today()
@@ -129,12 +115,15 @@ def fetch_counterparties():
 
 
 @st.cache_data(ttl=30)
-def fetch_transactions_view(date_from: date, date_to: date,
-                            project_id: str | None,
-                            t_type: str | None,
-                            status: str | None,
-                            category_id: str | None,
-                            counterparty_id: str | None):
+def fetch_transactions_view(
+    date_from: date,
+    date_to: date,
+    project_id: str | None,
+    t_type: str | None,
+    status: str | None,
+    category_id: str | None,
+    counterparty_id: str | None,
+):
     q = (
         sb.from_("v_finance_transactions")
         .select(
@@ -170,7 +159,12 @@ def insert_tx(payload: dict):
 
 @st.cache_data(ttl=30)
 def fetch_monthly_summary():
-    res = sb.from_("v_finance_monthly_summary").select("month,receita,despesa,saldo").order("month", desc=False).execute()
+    res = (
+        sb.from_("v_finance_monthly_summary")
+        .select("month,receita,despesa,saldo")
+        .order("month", desc=False)
+        .execute()
+    )
     return pd.DataFrame(res.data or [])
 
 
@@ -222,7 +216,7 @@ def clear_caches():
 
 
 # ==========================================================
-# DASHBOARD v1 (somente leitura)
+# DASHBOARD (v1.0)
 # ==========================================================
 st.subheader("Dashboard")
 
@@ -260,33 +254,19 @@ saldo_real = receita_real - despesa_real
 saldo_proj = (receita_real + receita_prev) - (despesa_real + despesa_prev)
 
 c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
-c1.metric("Receita (real)", _brl(receita_real))
-c2.metric("Despesa (real)", _brl(despesa_real))
-c3.metric("Saldo (real)", _brl(saldo_real))
-c4.metric("Receita (prev)", _brl(receita_prev))
-c5.metric("Saldo (projetado)", _brl(saldo_proj))
+c1.metric("Receita (real) 🟢", _brl(receita_real))
+c2.metric("Despesa (real) 🔴", _brl(despesa_real))
+c3.metric("Saldo (real) ⚪", _brl(saldo_real))
+c4.metric("Receita (prev) 🟡", _brl(receita_prev))
+c5.metric("Saldo (proj) 🟠", _brl(saldo_proj))
 
 st.divider()
 
-# gráfico mensal (últimos 6 meses)
-try:
-    import plotly.express as px
-except Exception:
-    px = None
-
-if not ms.empty:
-    ms_plot = ms.sort_values("month", ascending=True).tail(6)
-    if px is not None:
-        fig = px.bar(ms_plot, x="month", y=["receita", "despesa"], barmode="group")
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.line_chart(ms_plot.set_index("month")[["receita", "despesa", "saldo"]])
-else:
-    st.caption("Sem dados suficientes para gráfico ainda.")
-
-st.divider()
-
+# ==========================================================
+# Contas a receber / pagar (somente leitura)
+# ==========================================================
 r1, r2 = st.columns([1, 1])
+
 with r1:
     st.subheader("Contas a Receber (previsto)")
     df_r = fetch_receivables(limit=10)
@@ -385,7 +365,7 @@ with st.container(border=True):
     with c1:
         new_date = st.date_input("Data", value=today, format="DD/MM/YYYY", key="new_date")
     with c2:
-        new_type = st.selectbox("Tipo", TYPE_OPTIONS, index=1, key="new_type")  # default DESPESA
+        new_type = st.selectbox("Tipo", TYPE_OPTIONS, index=1, key="new_type")  # DESPESA
     with c3:
         new_status = st.selectbox("Status", ["REALIZADO", "PREVISTO", "CANCELADO"], index=0, key="new_status")
     with c4:
@@ -445,6 +425,7 @@ with st.container(border=True):
 st.divider()
 st.subheader("Lançamentos (somente leitura)")
 
+
 def _status_badge(s: str) -> str:
     s = (s or "").upper().strip()
     if s == "REALIZADO":
@@ -455,11 +436,13 @@ def _status_badge(s: str) -> str:
         return "⚫ CANCELADO"
     return s or ""
 
+
 def _clean_str(x) -> str:
     if x is None:
         return ""
     s = str(x).strip()
     return "" if s in ("None", "nan", "NaT") else s
+
 
 try:
     df = fetch_transactions_view(
@@ -480,7 +463,6 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
-# garante tipos e “None” limpo
 df2 = df.copy()
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
 df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
@@ -492,7 +474,6 @@ for col in ["description", "category_name", "counterparty_name", "project_code",
 if "status" in df2.columns:
     df2["status"] = df2["status"].apply(_status_badge)
 
-# monta tabela de exibição
 show = pd.DataFrame(
     {
         "Data": df2["date"],
