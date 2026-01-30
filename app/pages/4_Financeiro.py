@@ -223,6 +223,79 @@ f_status = None if status == "(Todos)" else status
 f_category_id = cat_map.get(cat_label)
 f_cp_id = cp_map.get(cp_label)
 
+# ==========================================================
+# Novo lançamento (APENAS INSERT)
+# ==========================================================
+st.divider()
+st.subheader("Novo lançamento")
+st.caption("✅ Nesta fase: criar lançamentos (sem editar/excluir).")
+
+def insert_tx(payload: dict):
+    return sb.table("finance_transactions").insert(payload).execute()
+
+with st.container(border=True):
+    c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.2])
+    with c1:
+        new_date = st.date_input("Data", value=today, format="DD/MM/YYYY", key="new_date")
+    with c2:
+        new_type = st.selectbox("Tipo", TYPE_OPTIONS, index=1, key="new_type")  # default DESPESA
+    with c3:
+        new_status = st.selectbox("Status", ["REALIZADO", "PREVISTO", "CANCELADO"], index=0, key="new_status")
+    with c4:
+        new_amount = st.number_input("Valor (R$)", min_value=0.01, value=0.01, step=10.0, key="new_amount")
+
+    d1, d2, d3 = st.columns([2.6, 1.6, 1.6])
+    with d1:
+        new_desc = st.text_input("Descrição", value="", key="new_desc")
+    with d2:
+        new_payment = st.text_input("Forma de pagamento (opcional)", value="", key="new_payment")
+    with d3:
+        new_comp = st.date_input("Competência (opcional)", value=None, format="DD/MM/YYYY", key="new_comp")
+
+    e1, e2, e3 = st.columns([2.0, 2.0, 2.0])
+    with e1:
+        new_cat_label = st.selectbox("Categoria", cat_options, index=0, key="new_cat")
+    with e2:
+        new_cp_label = st.selectbox("Cliente/Fornecedor", cp_options, index=0, key="new_cp")
+    with e3:
+        new_proj_label = st.selectbox("Projeto (opcional)", ["(Nenhum)"] + proj_options[1:], index=0, key="new_proj")
+
+    new_notes = st.text_area("Observações (opcional)", value="", height=80, key="new_notes")
+
+    if st.button("Salvar lançamento", type="primary"):
+        if norm(new_desc) == "":
+            st.error("Descrição é obrigatória.")
+        elif float(new_amount) <= 0:
+            st.error("Valor deve ser maior que zero.")
+        else:
+            payload = {
+                "date": new_date.isoformat() if new_date else None,
+                "type": new_type,
+                "status": new_status,
+                "description": norm(new_desc),
+                "amount": float(new_amount),
+
+                "category_id": cat_map.get(new_cat_label),
+                "counterparty_id": cp_map.get(new_cp_label),
+                "project_id": proj_map.get(new_proj_label) if new_proj_label != "(Nenhum)" else None,
+
+                "payment_method": norm(new_payment) or None,
+                "competence_month": new_comp.isoformat() if new_comp else None,
+                "notes": norm(new_notes) or None,
+
+                "created_by": user_email or None,
+            }
+
+            try:
+                insert_tx(payload)
+                st.success("Lançamento criado.")
+                fetch_transactions_view.clear()
+                st.rerun()
+            except Exception as e:
+                st.error("Erro ao salvar lançamento:")
+                st.code(_api_error_message(e))
+
+
 st.divider()
 st.subheader("Lançamentos (somente leitura)")
 
