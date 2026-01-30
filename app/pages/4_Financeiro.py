@@ -438,10 +438,26 @@ with st.container(border=True):
                 st.code(_api_error_message(e))
 
 # ==========================================================
-# LISTA (somente leitura)
+# LISTA (somente leitura) - UX melhor
 # ==========================================================
 st.divider()
 st.subheader("Lançamentos (somente leitura)")
+
+def _status_badge(s: str) -> str:
+    s = (s or "").upper().strip()
+    if s == "REALIZADO":
+        return "🟢 REALIZADO"
+    if s == "PREVISTO":
+        return "🟡 PREVISTO"
+    if s == "CANCELADO":
+        return "⚫ CANCELADO"
+    return s or ""
+
+def _clean_str(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    return "" if s in ("None", "nan", "NaT") else s
 
 try:
     df = fetch_transactions_view(
@@ -462,12 +478,44 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
-show_cols = [
-    "date", "type", "status", "description", "amount",
-    "category_name", "counterparty_name", "project_code",
-    "payment_method", "competence_month", "notes",
-]
-show_cols = [c for c in show_cols if c in df.columns]
+# garante tipos e “None” limpo
+df2 = df.copy()
+df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
+df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
 
-st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+for col in ["description", "category_name", "counterparty_name", "project_code", "payment_method", "notes"]:
+    if col in df2.columns:
+        df2[col] = df2[col].apply(_clean_str)
+
+if "status" in df2.columns:
+    df2["status"] = df2["status"].apply(_status_badge)
+
+# monta tabela de exibição
+show = pd.DataFrame(
+    {
+        "Data": df2["date"],
+        "Tipo": df2["type"].apply(_clean_str),
+        "Status": df2["status"].apply(_clean_str),
+        "Descrição": df2["description"],
+        "Categoria": df2.get("category_name", "").apply(_clean_str),
+        "Cliente/Fornecedor": df2.get("counterparty_name", "").apply(_clean_str),
+        "Projeto": df2.get("project_code", "").apply(_clean_str),
+        "Valor (R$)": df2["amount"].apply(lambda v: _brl(float(v))),
+        "Pagamento": df2.get("payment_method", "").apply(_clean_str),
+        "Obs": df2.get("notes", "").apply(_clean_str),
+    }
+)
+
+st.dataframe(
+    show,
+    use_container_width=True,
+    hide_index=True,
+    column_config={
+        "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
+        "Valor (R$)": st.column_config.TextColumn(width="small"),
+        "Descrição": st.column_config.TextColumn(width="large"),
+        "Obs": st.column_config.TextColumn(width="large"),
+    },
+)
+
 
