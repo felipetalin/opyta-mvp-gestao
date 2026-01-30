@@ -7,7 +7,6 @@ import streamlit as st
 from services.auth import require_login
 from services.supabase_client import get_authed_client
 from services.finance_guard import require_finance_access
-from services.finance_guard import require_finance_access, can_finance_write
 
 # Branding (não pode quebrar o app se faltar algo)
 try:
@@ -38,21 +37,17 @@ sb = get_authed_client()
 
 # 🔒 Acesso silencioso (para não constranger)
 user_email = require_finance_access(silent=True)
-can_write = can_finance_write(user_email)
-if can_write:
-    # ... (seu bloco inteiro de Novo lançamento)
-else:
-    st.subheader("Novo lançamento")
-    st.caption("Somente leitura para seu perfil. (Solicite ao Felipe para inserir.)")
 
-
-page_header("Financeiro", "Dashboard + inserir lançamentos (sem editar/excluir)", user_email)
+page_header("Financeiro", "Dashboard + lançamentos", user_email)
 
 TYPE_OPTIONS = ["RECEITA", "DESPESA", "TRANSFERENCIA"]
 STATUS_OPTIONS = ["PREVISTO", "REALIZADO", "CANCELADO"]
 today = date.today()
 
 
+# ==========================================================
+# Helpers
+# ==========================================================
 def _api_error_message(e: Exception) -> str:
     try:
         if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
@@ -75,6 +70,13 @@ def norm(x) -> str:
     return ("" if x is None else str(x)).strip()
 
 
+def _clean_str(x) -> str:
+    if x is None:
+        return ""
+    s = str(x).strip()
+    return "" if s in ("None", "nan", "NaT") else s
+
+
 def _brl(v: float) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -89,26 +91,22 @@ def month_range(d: date) -> tuple[date, date]:
     return m0, m_last
 
 
-def _clean_str(x) -> str:
-    if x is None:
-        return ""
-    s = str(x).strip()
-    return "" if s in ("None", "nan", "NaT") else s
+def _prev_month(d: date) -> date:
+    if d.month == 1:
+        return date(d.year - 1, 12, 1)
+    return date(d.year, d.month - 1, 1)
 
 
-def _status_badge_text(s: str) -> str:
-    s = (s or "").upper().strip()
-    if s == "REALIZADO":
-        return "🟢 REALIZADO"
-    if s == "PREVISTO":
-        return "🟡 PREVISTO"
-    if s == "CANCELADO":
-        return "⚫ CANCELADO"
-    return s or ""
+def _pct(curr: float, prev: float) -> str:
+    if prev == 0:
+        return "—"
+    p = ((curr - prev) / abs(prev)) * 100
+    arrow = "↑" if p >= 0 else "↓"
+    return f"{arrow} {abs(p):.1f}%"
 
 
 # ==========================================================
-# Cache / fetchs
+# Cache / fetchs (CONSERVADOR: não passa sb como argumento)
 # ==========================================================
 @st.cache_data(ttl=30)
 def fetch_projects():
@@ -242,20 +240,17 @@ def clear_caches():
 
 
 # ==========================================================
-# CSS GLOBAL (cards + chips + listas)
+# CSS Global
 # ==========================================================
 st.markdown(
     """
 <style>
 .op-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-top: 8px; }
 .op-card {
-  border-radius: 10px;
-  padding: 14px 16px;
-  color: #fff;
+  border-radius: 10px; padding: 14px 16px; color: #fff;
   box-shadow: 0 6px 16px rgba(0,0,0,.12);
   border: 1px solid rgba(255,255,255,.12);
-  position: relative;
-  min-height: 92px;
+  position: relative; min-height: 92px;
 }
 .op-title { font-size: 14px; font-weight: 600; opacity: .95; margin-bottom: 4px; }
 .op-value { font-size: 30px; font-weight: 800; line-height: 1.05; margin: 0; }
@@ -281,15 +276,10 @@ st.markdown(
 .op-mainline { font-size: 14px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 520px; }
 .op-subline { font-size: 12px; opacity: .75; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 520px; }
 .op-chip {
-  padding: 6px 10px;
-  border-radius: 999px;
-  font-weight: 800;
-  font-size: 12px;
-  color: #fff;
-  white-space: nowrap;
+  padding: 6px 10px; border-radius: 999px; font-weight: 800; font-size: 12px;
+  color: #fff; white-space: nowrap;
 }
 .op-chip-green { background: #2f7d55; }
-.op-chip-blue  { background: #1e5aa7; }
 .op-chip-orange{ background: #c66b10; }
 .op-chip-gray  { background: #555; }
 
@@ -308,8 +298,79 @@ st.markdown(
 
 
 # ==========================================================
-# DASHBOARD (v1.1)
+# DROPDOWNS (para filtros + insert + editor)
 # ==========================================================
+projects_df = fetch_projects()
+categories_df = fetch_categories()
+cp_df = fetch_counterparties()
+
+proj_options = ["(Todos)"]
+proj_map: dict[str, str | None] = {"(Todos)": None}
+if not projects_df.empty:
+    for _, r in projects_df.iterrows():
+        label = f"{norm(r.get('project_code'))} — {norm(r.get('name'))}".strip(" —")
+        proj_options.append(label)
+        proj_map[label] = norm(r.get("id")) or None
+
+cat_options = ["(Todas)"]
+cat_map: dict[str, str | None] = {"(Todas)": None}
+if not categories_df.empty:
+    for _, r in categories_df.iterrows():
+        label = norm(r.get("name"))
+        cat_options.append(label)
+        cat_map[label] = norm(r.get("id")) or None
+
+cp_options = ["(Todas)"]
+cp_map: dict[str, str | None] = {"(Todas)": None}
+if not cp_df.empty:
+    for _, r in cp_df.iterrows():
+        label = norm(r.get("name"))
+        cp_options.append(label)
+        cp_map[label] = norm(r.get("id")) or None
+
+
+# ==========================================================
+# FILTROS
+# ==========================================================
+st.subheader("Filtros")
+
+default_from = date(today.year, today.month, 1)
+default_to = today
+
+with st.container(border=True):
+    f1, f2, f3, f4, f5, f6 = st.columns([1.2, 1.2, 1.2, 1.2, 2.0, 2.0])
+    with f1:
+        date_from = st.date_input("De", value=default_from, format="DD/MM/YYYY")
+    with f2:
+        date_to = st.date_input("Até", value=default_to, format="DD/MM/YYYY")
+    with f3:
+        t_type = st.selectbox("Tipo", ["(Todos)"] + TYPE_OPTIONS, index=0)
+    with f4:
+        stt = st.selectbox("Status", ["(Todos)"] + STATUS_OPTIONS, index=0)
+    with f5:
+        proj_label = st.selectbox("Projeto", proj_options, index=0)
+    with f6:
+        cat_label = st.selectbox("Categoria", cat_options, index=0)
+
+    g1, g2 = st.columns([2.0, 1.0])
+    with g1:
+        cp_label = st.selectbox("Cliente/Fornecedor", cp_options, index=0)
+    with g2:
+        if st.button("Recarregar"):
+            clear_caches()
+            st.rerun()
+
+f_project_id = proj_map.get(proj_label)
+f_type = None if t_type == "(Todos)" else t_type
+f_status = None if stt == "(Todos)" else stt
+f_category_id = cat_map.get(cat_label)
+f_cp_id = cp_map.get(cp_label)
+
+
+# ==========================================================
+# DASHBOARD
+# ==========================================================
+st.divider()
 st.subheader("Dashboard")
 
 try:
@@ -331,50 +392,6 @@ sel_month = pd.to_datetime(sel_month_str).date()
 m_from, m_to = month_range(sel_month)
 txm = fetch_tx_min(m_from, m_to)
 
-receita_real = despesa_real = receita_prev = despesa_prev = 0.0
-if not txm.empty:
-    txm["type"] = txm["type"].astype(str).str.upper()
-    txm["status"] = txm["status"].astype(str).str.upper()
-    txm["amount"] = pd.to_numeric(txm["amount"], errors="coerce").fillna(0)
-
-    receita_real = float(txm[(txm["type"] == "RECEITA") & (txm["status"] == "REALIZADO")]["amount"].sum())
-    despesa_real = float(txm[(txm["type"] == "DESPESA") & (txm["status"] == "REALIZADO")]["amount"].sum())
-    receita_prev = float(txm[(txm["type"] == "RECEITA") & (txm["status"] == "PREVISTO")]["amount"].sum())
-    despesa_prev = float(txm[(txm["type"] == "DESPESA") & (txm["status"] == "PREVISTO")]["amount"].sum())
-
-saldo_real = receita_real - despesa_real
-
-# contagens
-n_receber = 0
-n_pagar = 0
-if not txm.empty:
-    n_receber = int(((txm["type"] == "RECEITA") & (txm["status"] == "PREVISTO")).sum())
-    n_pagar = int(((txm["type"] == "DESPESA") & (txm["status"] == "PREVISTO")).sum())
-
-saldo_atual = saldo_real
-receitas_previstas = receita_prev
-despesas_previstas = despesa_prev
-saldo_projetado = (saldo_real + receita_prev) - despesa_prev  # saldo atual + receitas prev - despesas prev
-
-# =========================
-# COMPARAÇÃO MÊS ANTERIOR
-# =========================
-def _prev_month(d: date) -> date:
-    if d.month == 1:
-        return date(d.year - 1, 12, 1)
-    return date(d.year, d.month - 1, 1)
-
-def _pct(curr: float, prev: float) -> str:
-    if prev == 0:
-        return "—"
-    p = ((curr - prev) / abs(prev)) * 100
-    arrow = "↑" if p >= 0 else "↓"
-    return f"{arrow} {abs(p):.1f}%"
-
-# mês atual
-m_from, m_to = month_range(sel_month)
-txm = fetch_tx_min(m_from, m_to)
-
 def _calc_month(tx: pd.DataFrame):
     r_real = d_real = r_prev = d_prev = 0.0
     if not tx.empty:
@@ -386,15 +403,10 @@ def _calc_month(tx: pd.DataFrame):
         d_real = float(t[(t["type"]=="DESPESA")&(t["status"]=="REALIZADO")]["amount"].sum())
         r_prev = float(t[(t["type"]=="RECEITA")&(t["status"]=="PREVISTO")]["amount"].sum())
         d_prev = float(t[(t["type"]=="DESPESA")&(t["status"]=="PREVISTO")]["amount"].sum())
-    return {
-        "saldo": r_real - d_real,
-        "r_prev": r_prev,
-        "d_prev": d_prev,
-    }
+    return {"saldo": r_real - d_real, "r_prev": r_prev, "d_prev": d_prev}
 
 curr = _calc_month(txm)
 
-# mês anterior
 pm = _prev_month(sel_month)
 pm_from, pm_to = month_range(pm)
 txm_prev = fetch_tx_min(pm_from, pm_to)
@@ -403,12 +415,18 @@ prev = _calc_month(txm_prev)
 saldo_delta = _pct(curr["saldo"], prev["saldo"])
 rprev_delta = _pct(curr["r_prev"], prev["r_prev"])
 dprev_delta = _pct(curr["d_prev"], prev["d_prev"])
-
 saldo_projetado = (curr["saldo"] + curr["r_prev"]) - curr["d_prev"]
 
-# =========================
-# CARDS (HTML) COM COMPARAÇÃO
-# =========================
+# contagens (a receber / a pagar)
+n_receber = 0
+n_pagar = 0
+if not txm.empty:
+    t2 = txm.copy()
+    t2["type"] = t2["type"].astype(str).str.upper()
+    t2["status"] = t2["status"].astype(str).str.upper()
+    n_receber = int(((t2["type"] == "RECEITA") & (t2["status"] == "PREVISTO")).sum())
+    n_pagar = int(((t2["type"] == "DESPESA") & (t2["status"] == "PREVISTO")).sum())
+
 st.markdown(
     f"""
 <div class="op-cards">
@@ -421,13 +439,13 @@ st.markdown(
   <div class="op-card op-blue">
     <div class="op-title">Receitas Previstas</div>
     <div class="op-value">{_brl(curr["r_prev"])}</div>
-    <div class="op-sub">{rprev_delta} vs mês anterior</div>
+    <div class="op-sub">{n_receber} a receber • {rprev_delta} vs mês anterior</div>
   </div>
 
   <div class="op-card op-orange">
     <div class="op-title">Despesas Previstas</div>
     <div class="op-value">{_brl(curr["d_prev"])}</div>
-    <div class="op-sub">{dprev_delta} vs mês anterior</div>
+    <div class="op-sub">{n_pagar} a pagar • {dprev_delta} vs mês anterior</div>
   </div>
 
   <div class="op-card op-red">
@@ -440,15 +458,15 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-
 st.divider()
-# =========================
+
+# ==========================================================
 # ALERTAS DE VENCIMENTO
-# =========================
+# ==========================================================
 st.subheader("Alertas")
 
 today_dt = today
-next_7 = today_dt + pd.Timedelta(days=7)
+next_7 = (pd.to_datetime(today_dt) + pd.Timedelta(days=7)).date()
 
 try:
     df_alert = fetch_transactions_view(
@@ -473,13 +491,11 @@ else:
     df_alert["amount"] = pd.to_numeric(df_alert["amount"], errors="coerce").fillna(0.0)
     df_alert["type"] = df_alert["type"].astype(str).str.upper()
 
-    # hoje
     df_today = df_alert[df_alert["date"] == today_dt]
-    # próximos 7 dias (exclui hoje)
     df_week = df_alert[(df_alert["date"] > today_dt) & (df_alert["date"] <= next_7)]
 
-    def _alert_card(title, df):
-        if df.empty:
+    def _alert_card(title: str, dfx: pd.DataFrame):
+        if dfx.empty:
             st.markdown(
                 f"""
                 <div class="op-panel">
@@ -491,10 +507,10 @@ else:
             )
             return
 
-        total = float(df["amount"].sum())
-        n = len(df)
-        rec = float(df[df["type"] == "RECEITA"]["amount"].sum())
-        desp = float(df[df["type"] == "DESPESA"]["amount"].sum())
+        total = float(dfx["amount"].sum())
+        n = len(dfx)
+        rec = float(dfx[dfx["type"] == "RECEITA"]["amount"].sum())
+        desp = float(dfx[dfx["type"] == "DESPESA"]["amount"].sum())
 
         st.markdown(
             f"""
@@ -512,17 +528,16 @@ else:
         )
 
     a1, a2 = st.columns([1, 1])
-
     with a1:
         _alert_card("⚠️ Vencem hoje", df_today)
-
     with a2:
         _alert_card("📅 Vencem nos próximos 7 dias", df_week)
+
 st.divider()
 
-# =========================
-# FLUXO DE CAIXA MENSAL (barras + linha saldo)
-# =========================
+# ==========================================================
+# FLUXO DE CAIXA MENSAL (6 meses)
+# ==========================================================
 st.subheader("Fluxo de Caixa Mensal")
 
 def _month_start(d: date) -> date:
@@ -534,7 +549,7 @@ def _add_months(d: date, n: int) -> date:
     return date(y, m, 1)
 
 end_m = _month_start(sel_month)
-start_m = _add_months(end_m, -5)  # 6 meses
+start_m = _add_months(end_m, -5)
 range_from = start_m
 range_to = month_range(end_m)[1]
 
@@ -549,18 +564,8 @@ else:
     df_range["type"] = df_range["type"].astype(str).str.upper()
     df_range["amount"] = pd.to_numeric(df_range["amount"], errors="coerce").fillna(0.0)
 
-    receita_m = (
-        df_range[df_range["type"] == "RECEITA"]
-        .groupby("month")["amount"]
-        .sum()
-        .rename("receita")
-    )
-    despesa_m = (
-        df_range[df_range["type"] == "DESPESA"]
-        .groupby("month")["amount"]
-        .sum()
-        .rename("despesa")
-    )
+    receita_m = df_range[df_range["type"] == "RECEITA"].groupby("month")["amount"].sum().rename("receita")
+    despesa_m = df_range[df_range["type"] == "DESPESA"].groupby("month")["amount"].sum().rename("despesa")
 
     months = pd.date_range(pd.to_datetime(start_m), pd.to_datetime(end_m), freq="MS").date
     plot_df = pd.DataFrame({"month": months}).set_index("month")
@@ -598,10 +603,11 @@ else:
 
 st.divider()
 
+# ==========================================================
+# DESPESAS POR CATEGORIA (donut)
+# ==========================================================
 st.subheader("Despesas por Categoria")
 
-# Para o donut, precisamos das despesas do mês com nome da categoria.
-# Vamos buscar pela view (já traz category_name).
 try:
     df_month_full = fetch_transactions_view(
         date_from=m_from,
@@ -628,37 +634,16 @@ else:
     if dfc.empty:
         st.caption("Sem despesas válidas para exibir.")
     else:
-        by_cat = (
-            dfc.groupby("category_name")["amount"]
-            .sum()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-
-        # evita categoria vazia
+        by_cat = dfc.groupby("category_name")["amount"].sum().sort_values(ascending=False).reset_index()
         by_cat["category_name"] = by_cat["category_name"].replace("", "(Sem categoria)")
 
         import plotly.express as px
 
-        fig = px.pie(
-            by_cat,
-            names="category_name",
-            values="amount",
-            hole=0.55,  # donut
-        )
-        fig.update_traces(
-            textposition="outside",
-            textinfo="percent+label",
-        )
-        fig.update_layout(
-            height=360,
-            margin=dict(l=10, r=10, t=10, b=10),
-            showlegend=False,
-        )
-
+        fig = px.pie(by_cat, names="category_name", values="amount", hole=0.55)
+        fig.update_traces(textposition="outside", textinfo="percent+label")
+        fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
 
-        # mini tabela abaixo (top 6)
         st.caption("Top categorias (mês):")
         topn = by_cat.head(6).copy()
         topn["Valor (R$)"] = topn["amount"].apply(lambda v: _brl(float(v)))
@@ -667,48 +652,36 @@ else:
             use_container_width=True,
             hide_index=True,
         )
+
 st.divider()
 
 # ==========================================================
-# Contas a receber / pagar (cards com chips)
+# Contas a receber / pagar (painel)
 # ==========================================================
 r1, r2 = st.columns([1, 1])
 
-def _chip_class_for_status(s: str) -> str:
-    s = (s or "").upper().strip()
-    if s == "REALIZADO":
-        return "op-chip-green"
-    if s == "PREVISTO":
-        return "op-chip-orange"
-    return "op-chip-gray"
-
-def _render_list_panel(df: pd.DataFrame, empty_text: str):
-    if df is None or df.empty:
+def _render_list_panel(df_in: pd.DataFrame, empty_text: str):
+    if df_in is None or df_in.empty:
         st.caption(empty_text)
         return
 
-    # normaliza
-    df2 = df.copy()
-    df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
-    df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
+    dfp = df_in.copy()
+    dfp["date"] = pd.to_datetime(dfp["date"], errors="coerce").dt.date
+    dfp["amount"] = pd.to_numeric(dfp["amount"], errors="coerce").fillna(0.0)
     for col in ["description", "counterparty_name", "project_code", "status"]:
-        if col in df2.columns:
-            df2[col] = df2[col].apply(_clean_str)
+        if col in dfp.columns:
+            dfp[col] = dfp[col].apply(_clean_str)
 
     html = '<div class="op-panel">'
-    for _, row in df2.iterrows():
+    for _, row in dfp.iterrows():
         d = row.get("date")
         d_txt = d.strftime("%d/%m") if isinstance(d, date) else ""
         proj = row.get("project_code") or ""
         cpty = row.get("counterparty_name") or ""
         desc = row.get("description") or ""
         amt = _brl(float(row.get("amount") or 0.0))
-        stt = (row.get("status") or "").upper().strip()
-        chip_cls = _chip_class_for_status(stt)
-        stt_txt = "Previsto" if stt == "PREVISTO" else ("Realizado" if stt == "REALIZADO" else (stt.title() if stt else ""))
-
         topline = " • ".join([x for x in [proj, cpty] if x])
-        subline = " • ".join([x for x in [d_txt, stt_txt] if x])
+        subline = " • ".join([x for x in [d_txt, (row.get("status") or "").title()] if x])
 
         html += f"""
         <div class="op-row">
@@ -717,10 +690,9 @@ def _render_list_panel(df: pd.DataFrame, empty_text: str):
             <div class="op-mainline">{desc}</div>
             <div class="op-subline">{subline}</div>
           </div>
-          <div class="op-chip {chip_cls}">{amt}</div>
+          <div class="op-chip op-chip-orange">{amt}</div>
         </div>
         """
-
     html += "</div>"
     st.markdown(html, unsafe_allow_html=True)
 
@@ -747,86 +719,17 @@ with r2:
 st.divider()
 
 # ==========================================================
-# DROPDOWNS (para filtros + insert)
+# NOVO LANÇAMENTO (INSERT)
 # ==========================================================
-projects_df = fetch_projects()
-categories_df = fetch_categories()
-cp_df = fetch_counterparties()
-
-proj_options = ["(Todos)"]
-proj_map: dict[str, str | None] = {"(Todos)": None}
-if not projects_df.empty:
-    for _, r in projects_df.iterrows():
-        label = f"{norm(r.get('project_code'))} — {norm(r.get('name'))}".strip(" —")
-        proj_options.append(label)
-        proj_map[label] = norm(r.get("id")) or None
-
-cat_options = ["(Todas)"]
-cat_map: dict[str, str | None] = {"(Todas)": None}
-if not categories_df.empty:
-    for _, r in categories_df.iterrows():
-        label = norm(r.get("name"))
-        cat_options.append(label)
-        cat_map[label] = norm(r.get("id")) or None
-
-cp_options = ["(Todas)"]
-cp_map: dict[str, str | None] = {"(Todas)": None}
-if not cp_df.empty:
-    for _, r in cp_df.iterrows():
-        label = norm(r.get("name"))
-        cp_options.append(label)
-        cp_map[label] = norm(r.get("id")) or None
-
-# ==========================================================
-# FILTROS
-# ==========================================================
-st.subheader("Filtros")
-
-default_from = date(today.year, today.month, 1)
-default_to = today
-
-with st.container(border=True):
-    f1, f2, f3, f4, f5, f6 = st.columns([1.2, 1.2, 1.2, 1.2, 2.0, 2.0])
-    with f1:
-        date_from = st.date_input("De", value=default_from, format="DD/MM/YYYY")
-    with f2:
-        date_to = st.date_input("Até", value=default_to, format="DD/MM/YYYY")
-    with f3:
-        t_type = st.selectbox("Tipo", ["(Todos)"] + TYPE_OPTIONS, index=0)
-    with f4:
-        status = st.selectbox("Status", ["(Todos)"] + STATUS_OPTIONS, index=0)
-    with f5:
-        proj_label = st.selectbox("Projeto", proj_options, index=0)
-    with f6:
-        cat_label = st.selectbox("Categoria", cat_options, index=0)
-
-    g1, g2 = st.columns([2.0, 1.0])
-    with g1:
-        cp_label = st.selectbox("Cliente/Fornecedor", cp_options, index=0)
-    with g2:
-        if st.button("Recarregar"):
-            clear_caches()
-            st.rerun()
-
-f_project_id = proj_map.get(proj_label)
-f_type = None if t_type == "(Todos)" else t_type
-f_status = None if status == "(Todos)" else status
-f_category_id = cat_map.get(cat_label)
-f_cp_id = cp_map.get(cp_label)
-
-# ==========================================================
-# NOVO LANÇAMENTO (APENAS INSERT)
-# ==========================================================
-st.divider()
 st.subheader("Novo lançamento")
-st.caption("✅ Nesta fase: criar lançamentos (sem editar/excluir).")
+st.caption("✅ Criar lançamentos. (Você pode editar/excluir na tabela abaixo.)")
 
 with st.container(border=True):
     c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.2])
     with c1:
         new_date = st.date_input("Data", value=today, format="DD/MM/YYYY", key="new_date")
     with c2:
-        new_type = st.selectbox("Tipo", TYPE_OPTIONS, index=1, key="new_type")  # DESPESA
+        new_type = st.selectbox("Tipo", TYPE_OPTIONS, index=1, key="new_type")
     with c3:
         new_status = st.selectbox("Status", ["REALIZADO", "PREVISTO", "CANCELADO"], index=0, key="new_status")
     with c4:
@@ -874,21 +777,17 @@ with st.container(border=True):
             try:
                 insert_tx(payload)
                 st.success("Lançamento criado.")
-                fetch_transactions_view.clear()
-                fetch_tx_min.clear()
-                fetch_monthly_summary.clear()
-                fetch_receivables.clear()
-                fetch_payables.clear()
+                clear_caches()
                 st.rerun()
             except Exception as e:
                 st.error("Erro ao salvar lançamento:")
                 st.code(_api_error_message(e))
-                st.divider()
+
+st.divider()
 
 # ==========================================================
 # LISTA (EDIÇÃO INLINE + EXCLUSÃO)
 # ==========================================================
-st.divider()
 st.subheader("Lançamentos (edição inline)")
 st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Exclua com confirmação.")
 
@@ -911,35 +810,20 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
-# =========================
-# Normalização
-# =========================
 df2 = df.copy()
 df2["id"] = df2["id"].astype(str)
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
 df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
 
-for col in [
-    "description",
-    "payment_method",
-    "notes",
-]:
+for col in ["description", "payment_method", "notes"]:
     if col in df2.columns:
         df2[col] = df2[col].apply(_clean_str)
 
-# =========================
-# Mapeamentos (dropdowns)
-# =========================
-status_options = STATUS_OPTIONS
-type_options = TYPE_OPTIONS
-
+# Maps id -> label para dropdowns no editor
 cat_label_by_id = {v: k for k, v in cat_map.items() if v}
 cp_label_by_id = {v: k for k, v in cp_map.items() if v}
 proj_label_by_id = {v: k for k, v in proj_map.items() if v}
 
-# =========================
-# DataFrame editável (index = id)
-# =========================
 df_edit = pd.DataFrame(
     {
         "Data": df2["date"],
@@ -964,8 +848,8 @@ edited = st.data_editor(
     num_rows="fixed",
     column_config={
         "Data": st.column_config.DateColumn(format="DD/MM/YYYY"),
-        "Tipo": st.column_config.SelectboxColumn(options=type_options),
-        "Status": st.column_config.SelectboxColumn(options=status_options),
+        "Tipo": st.column_config.SelectboxColumn(options=TYPE_OPTIONS),
+        "Status": st.column_config.SelectboxColumn(options=STATUS_OPTIONS),
         "Categoria": st.column_config.SelectboxColumn(options=list(cat_map.keys())),
         "Cliente/Fornecedor": st.column_config.SelectboxColumn(options=list(cp_map.keys())),
         "Projeto": st.column_config.SelectboxColumn(options=list(proj_map.keys())),
@@ -978,32 +862,33 @@ edited = st.data_editor(
 
 c1, c2 = st.columns([1, 1])
 save_btn = c1.button("Salvar alterações", type="primary")
-reload_btn = c2.button("Recarregar")
+reload_btn = c2.button("Recarregar lançamentos")
 
 if reload_btn:
     clear_caches()
     st.rerun()
 
-# =========================
-# SALVAR / EXCLUIR
-# =========================
 if save_btn:
     before = df_edit.copy()
     after = edited.copy()
 
     n_updates = 0
     n_deletes = 0
+    warnings: list[str] = []
 
     for tx_id, ra in after.iterrows():
         rb = before.loc[tx_id]
 
         # Exclusão
         if ra["Excluir?"] is True:
-            sb.table("finance_transactions").delete().eq("id", tx_id).execute()
-            n_deletes += 1
+            try:
+                sb.table("finance_transactions").delete().eq("id", tx_id).execute()
+                n_deletes += 1
+            except Exception as e:
+                warnings.append(f"Erro ao excluir {tx_id}: {_api_error_message(e)}")
             continue
 
-        # Verifica mudança
+        # Mudou algo?
         changed = False
         for c in before.columns:
             if c == "Excluir?":
@@ -1011,8 +896,18 @@ if save_btn:
             if norm(rb[c]) != norm(ra[c]):
                 changed = True
                 break
-
         if not changed:
+            continue
+
+        # Validações mínimas
+        if ra["Data"] is None:
+            warnings.append(f"{tx_id}: Data vazia (update ignorado).")
+            continue
+        if float(ra["Valor"]) <= 0:
+            warnings.append(f"{tx_id}: Valor deve ser > 0 (update ignorado).")
+            continue
+        if norm(ra["Descrição"]) == "":
+            warnings.append(f"{tx_id}: Descrição obrigatória (update ignorado).")
             continue
 
         payload = {
@@ -1028,8 +923,14 @@ if save_btn:
             "notes": norm(ra["Obs"]) or None,
         }
 
-        sb.table("finance_transactions").update(payload).eq("id", tx_id).execute()
-        n_updates += 1
+        try:
+            sb.table("finance_transactions").update(payload).eq("id", tx_id).execute()
+            n_updates += 1
+        except Exception as e:
+            warnings.append(f"Erro ao atualizar {tx_id}: {_api_error_message(e)}")
+
+    if warnings:
+        st.warning("\n".join(warnings))
 
     st.success(f"Atualizados: {n_updates} • Excluídos: {n_deletes}")
     clear_caches()
