@@ -839,16 +839,32 @@ cat_label_by_id = {v: k for k, v in cat_map.items() if v}
 cp_label_by_id = {v: k for k, v in cp_map.items() if v}
 proj_label_by_id = {v: k for k, v in proj_map.items() if v}
 
-# -------------------------
-# DataFrame editável (id como index)
-# Excluir? como PRIMEIRA coluna
-# -------------------------
+# =========================
+# DataFrame editável (index = id)
+# =========================
+CAT_NONE = "(Sem)"
+CP_NONE = "(Sem)"
+PROJ_NONE = "(Sem)"
+
+cat_options_editor = [CAT_NONE] + [k for k in cat_map.keys() if k != "(Todas)"]
+cp_options_editor  = [CP_NONE]  + [k for k in cp_map.keys() if k != "(Todas)"]
+proj_options_editor= [PROJ_NONE]+ [k for k in proj_map.keys() if k != "(Todos)"]
+
+cat_label_by_id = {v: k for k, v in cat_map.items() if v}
+cp_label_by_id  = {v: k for k, v in cp_map.items() if v}
+proj_label_by_id= {v: k for k, v in proj_map.items() if v}
+
+# normaliza colunas base (pra não virar None por NaN)
+df2["type"] = df2["type"].astype(str).str.upper().replace({"NAN": ""}).fillna("")
+df2["status"] = df2["status"].astype(str).str.upper().replace({"NAN": ""}).fillna("")
+df2["description"] = df2["description"].fillna("").apply(_clean_str)
+
 df_edit = pd.DataFrame(
     {
         "Excluir?": False,
         "Data": df2["date"],
-        "Tipo": df2["type"].astype(str),
-        "Status": df2["status"].astype(str),
+        "Tipo": df2["type"],
+        "Status": df2["status"],
         "Descrição": df2["description"],
         "Categoria": df2["category_id"].map(cat_label_by_id).fillna(CAT_NONE),
         "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(CP_NONE),
@@ -860,12 +876,8 @@ df_edit = pd.DataFrame(
     index=df2["id"],
 )
 
-# Mantém a seleção de exclusão entre reruns (opcional, mas ajuda)
-if "finance_editor_df" not in st.session_state:
-    st.session_state["finance_editor_df"] = df_edit.copy()
-
 edited = st.data_editor(
-    st.session_state["finance_editor_df"],
+    df_edit,
     key="finance_editor",
     use_container_width=True,
     hide_index=True,
@@ -905,10 +917,11 @@ save_btn = c1.button("Salvar alterações", type="primary")
 reload_btn = c2.button("Recarregar lançamentos")
 
 if reload_btn:
-    # limpa e recarrega (e reseta editor)
     clear_caches()
-    st.session_state.pop("finance_editor_df", None)
+    if "finance_editor" in st.session_state:
+        del st.session_state["finance_editor"]
     st.rerun()
+
 
 # -------------------------
 # Confirmação de exclusão em 2 etapas
