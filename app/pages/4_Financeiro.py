@@ -812,14 +812,58 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
+    # --- Guardrail: a view precisa trazer essas colunas
+required_cols = ["id", "date", "type", "status", "description", "amount", "category_id", "counterparty_id", "project_id"]
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    st.error("A view v_finance_transactions não retornou colunas obrigatórias.")
+    st.code(f"Faltando: {missing}\nColunas retornadas: {list(df.columns)}")
+    st.stop()
+
+# --- Remove linhas fantasmas (quando a view retorna tudo NULL por join/bug)
+df = df.copy()
+
+# remove id nulo/vazio
+df["id"] = df["id"].astype(str)
+df = df[df["id"].notna() & (df["id"].str.strip() != "")]
+
+# remove linhas onde TODO o conteúdo é nulo/zero/vazio (linha fantasma)
+ghost_mask = (
+    df["date"].isna()
+    & df["type"].isna()
+    & df["status"].isna()
+    & df["description"].isna()
+    & df["amount"].isna()
+    & df["category_id"].isna()
+    & df["counterparty_id"].isna()
+    & df["project_id"].isna()
+)
+
+df = df[~ghost_mask]
+
+if df.empty:
+    st.info("A consulta retornou apenas linhas nulas (provável linha fantasma na view).")
+    st.stop()
+
+
 # -------------------------
 # Normalização base (NUNCA deixar NaN/None virar 'None' na UI)
 # -------------------------
 df2 = df.copy()
-df2["id"] = df2["id"].astype(str)
+
+df2["id"] = df2["id"].astype(str).str.strip()
+df2 = df2[df2["id"] != ""]
+
+# mata "None"/"nan" string na origem
+for c in ["type", "status", "description", "payment_method", "notes"]:
+    if c in df2.columns:
+        df2[c] = df2[c].apply(_clean_str)
 
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
 df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
+
+
+
 
 # garante strings (sem None/Nan/NaT)
 df2["type"] = df2.get("type", "").fillna("").astype(str).str.upper()
