@@ -434,6 +434,83 @@ st.markdown(
 
 
 st.divider()
+# =========================
+# ALERTAS DE VENCIMENTO
+# =========================
+st.subheader("Alertas")
+
+today_dt = today
+next_7 = today_dt + pd.Timedelta(days=7)
+
+try:
+    df_alert = fetch_transactions_view(
+        date_from=today_dt,
+        date_to=next_7,
+        project_id=None,
+        t_type=None,
+        status="PREVISTO",
+        category_id=None,
+        counterparty_id=None,
+    )
+except Exception as e:
+    st.error("Erro ao carregar alertas de vencimento:")
+    st.code(_api_error_message(e))
+    df_alert = pd.DataFrame()
+
+if df_alert.empty:
+    st.caption("Nenhum lançamento previsto para vencer nos próximos dias.")
+else:
+    df_alert = df_alert.copy()
+    df_alert["date"] = pd.to_datetime(df_alert["date"], errors="coerce").dt.date
+    df_alert["amount"] = pd.to_numeric(df_alert["amount"], errors="coerce").fillna(0.0)
+    df_alert["type"] = df_alert["type"].astype(str).str.upper()
+
+    # hoje
+    df_today = df_alert[df_alert["date"] == today_dt]
+    # próximos 7 dias (exclui hoje)
+    df_week = df_alert[(df_alert["date"] > today_dt) & (df_alert["date"] <= next_7)]
+
+    def _alert_card(title, df):
+        if df.empty:
+            st.markdown(
+                f"""
+                <div class="op-panel">
+                  <strong>{title}</strong>
+                  <div style="opacity:.75; margin-top:6px;">Nenhum lançamento</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            return
+
+        total = float(df["amount"].sum())
+        n = len(df)
+        rec = float(df[df["type"] == "RECEITA"]["amount"].sum())
+        desp = float(df[df["type"] == "DESPESA"]["amount"].sum())
+
+        st.markdown(
+            f"""
+            <div class="op-panel">
+              <strong>{title}</strong>
+              <div style="margin-top:6px;">
+                <b>{n}</b> lançamentos • <b>{_brl(total)}</b>
+              </div>
+              <div style="opacity:.85; margin-top:4px; font-size:13px;">
+                Receitas: {_brl(rec)} • Despesas: {_brl(desp)}
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    a1, a2 = st.columns([1, 1])
+
+    with a1:
+        _alert_card("⚠️ Vencem hoje", df_today)
+
+    with a2:
+        _alert_card("📅 Vencem nos próximos 7 dias", df_week)
+st.divider()
 
 # =========================
 # FLUXO DE CAIXA MENSAL (barras + linha saldo)
