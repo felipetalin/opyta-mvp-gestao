@@ -24,6 +24,18 @@ except Exception:
             st.caption(f"Logado como: {user_email}")
 
 
+from finance.access import finance_guard
+from finance.dashboard import render_dashboard
+from finance.data import (
+    norm,
+    api_error_message,
+    fetch_projects,
+    fetch_categories,
+    fetch_counterparties,
+    fetch_transactions_view,
+    insert_transaction,
+)
+
 # ==========================================================
 # Boot (ordem obrigatória)
 # ==========================================================
@@ -35,138 +47,36 @@ require_login()
 sb = get_authed_client()
 
 user_email = (st.session_state.get("user_email") or "").strip().lower()
-page_header("Financeiro", "Somente leitura (fase 1)", user_email)
+page_header("Financeiro", "Fase 2: dashboard + inserir lançamentos (sem editar/excluir)", user_email)
 
-# ==========================================================
 # Acesso restrito (Felipe + Yuri)
-# ==========================================================
-ALLOWED_FINANCE_EMAILS = {
-    "felipetalin@opyta.com.br",
-    "yurisimoes@opyta.com.br",
-}
-if user_email not in {e.lower() for e in ALLOWED_FINANCE_EMAILS}:
-    st.info("Módulo em implantação (desativado). Em breve.")
-    st.stop()
-
+finance_guard(user_email)
 
 # ==========================================================
-# Helpers (estilo do app)
+# Constantes
 # ==========================================================
-def _api_error_message(e: Exception) -> str:
-    try:
-        if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
-            d = e.args[0]
-            msg = d.get("message") or str(d)
-            details = d.get("details")
-            hint = d.get("hint")
-            out = msg
-            if hint:
-                out += f"\nHint: {hint}"
-            if details:
-                out += f"\nDetalhes: {details}"
-            return out
-        return str(e)
-    except Exception:
-        return "Erro desconhecido."
-
-
-def norm(x) -> str:
-    return ("" if x is None else str(x)).strip()
-
-
-@st.cache_data(ttl=30)
-def fetch_projects():
-    res = (
-        sb.table("projects")
-        .select("id,project_code,name")
-        .order("project_code", desc=False)
-        .execute()
-    )
-    return pd.DataFrame(res.data or [])
-
-
-@st.cache_data(ttl=30)
-def fetch_categories():
-    res = (
-        sb.table("finance_categories")
-        .select("id,name,type,active")
-        .eq("active", True)
-        .order("name", desc=False)
-        .execute()
-    )
-    return pd.DataFrame(res.data or [])
-
-
-@st.cache_data(ttl=30)
-def fetch_counterparties():
-    res = (
-        sb.table("finance_counterparties")
-        .select("id,name,type,active")
-        .eq("active", True)
-        .order("name", desc=False)
-        .execute()
-    )
-    return pd.DataFrame(res.data or [])
-
-
-@st.cache_data(ttl=30)
-def fetch_transactions_view(date_from: date, date_to: date,
-                            project_id: str | None,
-                            t_type: str | None,
-                            status: str | None,
-                            category_id: str | None,
-                            counterparty_id: str | None):
-    q = (
-        sb.from_("v_finance_transactions")
-        .select(
-            "id,date,type,status,description,amount,"
-            "category_name,counterparty_name,project_code,"
-            "payment_method,competence_month,notes,created_by"
-        )
-        .gte("date", date_from.isoformat())
-        .lte("date", date_to.isoformat())
-        .order("date", desc=True)
-    )
-
-    if project_id:
-        q = q.eq("project_id", project_id)
-    if t_type:
-        q = q.eq("type", t_type)
-    if status:
-        q = q.eq("status", status)
-    if category_id:
-        q = q.eq("category_id", category_id)
-    if counterparty_id:
-        q = q.eq("counterparty_id", counterparty_id)
-
-    res = q.execute()
-    return pd.DataFrame(res.data or [])
-
-
-def refresh_readonly_caches():
-    fetch_projects.clear()
-    fetch_categories.clear()
-    fetch_counterparties.clear()
-    fetch_transactions_view.clear()
-
-
-# ==========================================================
-# UI - filtros e lista (somente leitura)
-# ==========================================================
-st.subheader("Filtros")
-
 today = date.today()
-default_from = date(today.year, today.month, 1)
-default_to = today
-
 TYPE_OPTIONS = ["RECEITA", "DESPESA", "TRANSFERENCIA"]
 STATUS_OPTIONS = ["PREVISTO", "REALIZADO", "CANCELADO"]
 
-projects_df = fetch_projects()
-categories_df = fetch_categories()
-cp_df = fetch_counterparties()
+# ==========================================================
+# Dashboard (somente leitura)
+# ==========================================================
+try:
+    render_dashboard(sb)
+except Exception as e:
+    st.error("Erro ao carregar dashboard:")
+    st.code(api_error_message(e))
 
-# dropdowns (label -> id)
+st.divider()
+
+# ==========================================================
+# Loads dropdowns
+# ==========================================================
+projects_df = fetch_projects(sb)
+categories_df = fetch_categories(sb)
+cp_df = fetch_counterparties(sb)
+
 proj_options = ["(Todos)"]
 proj_map: dict[str, str | None] = {"(Todos)": None}
 if not projects_df.empty:
@@ -191,19 +101,24 @@ if not cp_df.empty:
         cp_options.append(label)
         cp_map[label] = norm(r.get("id")) or None
 
+# ==========================================================
+# Filtros
+# ==========================================================
+st.subheader("Filtros")
+
+default_from = date(today.year, today.month, 1)
+default_to = today
+
 with st.container(border=True):
     f1, f2, f3, f4, f5, f6 = st.columns([1.2, 1.2, 1.2, 1.2, 2.0, 2.0])
-
     with f1:
         date_from = st.date_input("De", value=default_from, format="DD/MM/YYYY")
     with f2:
         date_to = st.date_input("Até", value=default_to, format="DD/MM/YYYY")
-
     with f3:
         t_type = st.selectbox("Tipo", ["(Todos)"] + TYPE_OPTIONS, index=0)
     with f4:
         status = st.selectbox("Status", ["(Todos)"] + STATUS_OPTIONS, index=0)
-
     with f5:
         proj_label = st.selectbox("Projeto", proj_options, index=0)
     with f6:
@@ -214,7 +129,8 @@ with st.container(border=True):
         cp_label = st.selectbox("Cliente/Fornecedor", cp_options, index=0)
     with g2:
         if st.button("Recarregar"):
-            refresh_readonly_caches()
+            # limpeza mínima
+            fetch_transactions_view.clear()
             st.rerun()
 
 f_project_id = proj_map.get(proj_label)
@@ -229,9 +145,6 @@ f_cp_id = cp_map.get(cp_label)
 st.divider()
 st.subheader("Novo lançamento")
 st.caption("✅ Nesta fase: criar lançamentos (sem editar/excluir).")
-
-def insert_tx(payload: dict):
-    return sb.table("finance_transactions").insert(payload).execute()
 
 with st.container(border=True):
     c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.2])
@@ -274,33 +187,33 @@ with st.container(border=True):
                 "status": new_status,
                 "description": norm(new_desc),
                 "amount": float(new_amount),
-
                 "category_id": cat_map.get(new_cat_label),
                 "counterparty_id": cp_map.get(new_cp_label),
                 "project_id": proj_map.get(new_proj_label) if new_proj_label != "(Nenhum)" else None,
-
                 "payment_method": norm(new_payment) or None,
                 "competence_month": new_comp.isoformat() if new_comp else None,
                 "notes": norm(new_notes) or None,
-
                 "created_by": user_email or None,
             }
 
             try:
-                insert_tx(payload)
+                insert_transaction(sb, payload)
                 st.success("Lançamento criado.")
                 fetch_transactions_view.clear()
                 st.rerun()
             except Exception as e:
                 st.error("Erro ao salvar lançamento:")
-                st.code(_api_error_message(e))
+                st.code(api_error_message(e))
 
-
+# ==========================================================
+# Lançamentos (somente leitura)
+# ==========================================================
 st.divider()
 st.subheader("Lançamentos (somente leitura)")
 
 try:
     df = fetch_transactions_view(
+        sb,
         date_from=date_from,
         date_to=date_to,
         project_id=f_project_id,
@@ -311,14 +224,13 @@ try:
     )
 except Exception as e:
     st.error("Erro ao carregar lançamentos:")
-    st.code(_api_error_message(e))
+    st.code(api_error_message(e))
     st.stop()
 
 if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
-# Tabela somente leitura
 show_cols = [
     "date", "type", "status", "description", "amount",
     "category_name", "counterparty_name", "project_code",
@@ -326,9 +238,4 @@ show_cols = [
 ]
 show_cols = [c for c in show_cols if c in df.columns]
 
-st.dataframe(
-    df[show_cols],
-    use_container_width=True,
-    hide_index=True,
-)
-
+st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
