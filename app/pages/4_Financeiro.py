@@ -460,6 +460,77 @@ else:
 
 st.divider()
 
+st.subheader("Despesas por Categoria")
+
+# Para o donut, precisamos das despesas do mês com nome da categoria.
+# Vamos buscar pela view (já traz category_name).
+try:
+    df_month_full = fetch_transactions_view(
+        date_from=m_from,
+        date_to=m_to,
+        project_id=None,
+        t_type="DESPESA",
+        status=None,
+        category_id=None,
+        counterparty_id=None,
+    )
+except Exception as e:
+    st.error("Erro ao montar despesas por categoria:")
+    st.code(_api_error_message(e))
+    df_month_full = pd.DataFrame()
+
+if df_month_full.empty:
+    st.caption("Sem despesas no mês selecionado.")
+else:
+    dfc = df_month_full.copy()
+    dfc["amount"] = pd.to_numeric(dfc["amount"], errors="coerce").fillna(0.0)
+    dfc["category_name"] = dfc.get("category_name", "").apply(_clean_str)
+    dfc = dfc[dfc["amount"] > 0]
+
+    if dfc.empty:
+        st.caption("Sem despesas válidas para exibir.")
+    else:
+        by_cat = (
+            dfc.groupby("category_name")["amount"]
+            .sum()
+            .sort_values(ascending=False)
+            .reset_index()
+        )
+
+        # evita categoria vazia
+        by_cat["category_name"] = by_cat["category_name"].replace("", "(Sem categoria)")
+
+        import plotly.express as px
+
+        fig = px.pie(
+            by_cat,
+            names="category_name",
+            values="amount",
+            hole=0.55,  # donut
+        )
+        fig.update_traces(
+            textposition="outside",
+            textinfo="percent+label",
+        )
+        fig.update_layout(
+            height=360,
+            margin=dict(l=10, r=10, t=10, b=10),
+            showlegend=False,
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
+
+        # mini tabela abaixo (top 6)
+        st.caption("Top categorias (mês):")
+        topn = by_cat.head(6).copy()
+        topn["Valor (R$)"] = topn["amount"].apply(lambda v: _brl(float(v)))
+        st.dataframe(
+            topn[["category_name", "Valor (R$)"]].rename(columns={"category_name": "Categoria"}),
+            use_container_width=True,
+            hide_index=True,
+        )
+st.divider()
+
 # ==========================================================
 # Contas a receber / pagar (cards com chips)
 # ==========================================================
