@@ -4,6 +4,20 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+# sb injetado pela page (conservador: evita hash do cache)
+_SB = None
+
+
+def set_sb(sb) -> None:
+    global _SB
+    _SB = sb
+
+
+def _sb():
+    if _SB is None:
+        raise RuntimeError("Supabase client não foi inicializado. Chame set_sb(sb) na página.")
+    return _SB
+
 
 def norm(x) -> str:
     return ("" if x is None else str(x)).strip()
@@ -28,15 +42,16 @@ def api_error_message(e: Exception) -> str:
 
 
 @st.cache_data(ttl=30)
-def fetch_projects(sb):
-    res = sb.table("projects").select("id,project_code,name").order("project_code", desc=False).execute()
+def fetch_projects():
+    res = _sb().table("projects").select("id,project_code,name").order("project_code", desc=False).execute()
     return pd.DataFrame(res.data or [])
 
 
 @st.cache_data(ttl=30)
-def fetch_categories(sb):
+def fetch_categories():
     res = (
-        sb.table("finance_categories")
+        _sb()
+        .table("finance_categories")
         .select("id,name,type,active")
         .eq("active", True)
         .order("name", desc=False)
@@ -46,9 +61,10 @@ def fetch_categories(sb):
 
 
 @st.cache_data(ttl=30)
-def fetch_counterparties(sb):
+def fetch_counterparties():
     res = (
-        sb.table("finance_counterparties")
+        _sb()
+        .table("finance_counterparties")
         .select("id,name,type,active")
         .eq("active", True)
         .order("name", desc=False)
@@ -58,17 +74,23 @@ def fetch_counterparties(sb):
 
 
 @st.cache_data(ttl=30)
-def fetch_transactions_view(sb, date_from: date, date_to: date,
-                            project_id: str | None,
-                            t_type: str | None,
-                            status: str | None,
-                            category_id: str | None,
-                            counterparty_id: str | None):
+def fetch_transactions_view(
+    date_from: date,
+    date_to: date,
+    project_id: str | None,
+    t_type: str | None,
+    status: str | None,
+    category_id: str | None,
+    counterparty_id: str | None,
+):
     q = (
-        sb.from_("v_finance_transactions")
+        _sb()
+        .from_("v_finance_transactions")
         .select(
             "id,date,type,status,description,amount,"
-            "category_name,counterparty_name,project_code,project_name,"
+            "category_id,category_name,"
+            "counterparty_id,counterparty_name,"
+            "project_id,project_code,project_name,"
             "payment_method,competence_month,notes,created_by"
         )
         .gte("date", date_from.isoformat())
@@ -91,20 +113,22 @@ def fetch_transactions_view(sb, date_from: date, date_to: date,
     return pd.DataFrame(res.data or [])
 
 
-def insert_transaction(sb, payload: dict):
-    return sb.table("finance_transactions").insert(payload).execute()
+def insert_transaction(payload: dict):
+    # insert NÃO usa cache, mas usa o mesmo sb global para manter padrão simples
+    return _sb().table("finance_transactions").insert(payload).execute()
 
 
 @st.cache_data(ttl=30)
-def fetch_monthly_summary(sb):
-    res = sb.from_("v_finance_monthly_summary").select("month,receita,despesa,saldo").order("month", desc=False).execute()
+def fetch_monthly_summary():
+    res = _sb().from_("v_finance_monthly_summary").select("month,receita,despesa,saldo").order("month", desc=False).execute()
     return pd.DataFrame(res.data or [])
 
 
 @st.cache_data(ttl=30)
-def fetch_tx_min(sb, date_from: date, date_to: date):
+def fetch_tx_min(date_from: date, date_to: date):
     res = (
-        sb.table("finance_transactions")
+        _sb()
+        .table("finance_transactions")
         .select("date,type,status,amount")
         .gte("date", date_from.isoformat())
         .lte("date", date_to.isoformat())
@@ -114,9 +138,10 @@ def fetch_tx_min(sb, date_from: date, date_to: date):
 
 
 @st.cache_data(ttl=30)
-def fetch_receivables(sb, limit: int = 10):
+def fetch_receivables(limit: int = 10):
     res = (
-        sb.from_("v_finance_receivables")
+        _sb()
+        .from_("v_finance_receivables")
         .select("date,description,amount,counterparty_name,project_code,status")
         .order("date", desc=False)
         .limit(limit)
@@ -126,9 +151,10 @@ def fetch_receivables(sb, limit: int = 10):
 
 
 @st.cache_data(ttl=30)
-def fetch_payables(sb, limit: int = 10):
+def fetch_payables(limit: int = 10):
     res = (
-        sb.from_("v_finance_payables")
+        _sb()
+        .from_("v_finance_payables")
         .select("date,description,amount,counterparty_name,project_code,status")
         .order("date", desc=False)
         .limit(limit)
@@ -146,3 +172,4 @@ def clear_finance_caches():
     fetch_tx_min.clear()
     fetch_receivables.clear()
     fetch_payables.clear()
+

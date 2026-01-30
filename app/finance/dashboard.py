@@ -7,6 +7,10 @@ import streamlit as st
 from finance.data import fetch_monthly_summary, fetch_tx_min, fetch_receivables, fetch_payables
 
 
+def _brl(v: float) -> str:
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def month_range(d: date) -> tuple[date, date]:
     m0 = date(d.year, d.month, 1)
     if d.month == 12:
@@ -17,11 +21,10 @@ def month_range(d: date) -> tuple[date, date]:
     return m0, m_last
 
 
-def render_dashboard(sb):
+def render_dashboard():
     st.subheader("Dashboard")
 
-    # selector de mês (por competência via summary)
-    ms = fetch_monthly_summary(sb)
+    ms = fetch_monthly_summary()
     if not ms.empty:
         ms["month"] = pd.to_datetime(ms["month"]).dt.date
         month_options = [m.isoformat() for m in sorted(ms["month"].unique(), reverse=True)]
@@ -32,7 +35,7 @@ def render_dashboard(sb):
     sel_month = pd.to_datetime(sel_month_str).date()
 
     m_from, m_to = month_range(sel_month)
-    txm = fetch_tx_min(sb, m_from, m_to)
+    txm = fetch_tx_min(m_from, m_to)
 
     receita_real = despesa_real = receita_prev = despesa_prev = 0.0
     if not txm.empty:
@@ -48,24 +51,23 @@ def render_dashboard(sb):
     saldo_real = receita_real - despesa_real
     saldo_proj = (receita_real + receita_prev) - (despesa_real + despesa_prev)
 
-    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
-    c1.metric("Receita (real)", f"R$ {receita_real:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c2.metric("Despesa (real)", f"R$ {despesa_real:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c3.metric("Saldo (real)", f"R$ {saldo_real:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c4.metric("Receita (prev)", f"R$ {receita_prev:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c5.metric("Saldo (projetado)", f"R$ {saldo_proj:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    a, b, c, d, e = st.columns([1, 1, 1, 1, 1])
+    a.metric("Receita (real)", _brl(receita_real))
+    b.metric("Despesa (real)", _brl(despesa_real))
+    c.metric("Saldo (real)", _brl(saldo_real))
+    d.metric("Receita (prev)", _brl(receita_prev))
+    e.metric("Saldo (projetado)", _brl(saldo_proj))
 
     st.divider()
 
-    # Gráfico mensal (usa summary)
+    # gráfico (se tiver plotly; se não tiver, cai no line_chart)
     try:
         import plotly.express as px
     except Exception:
         px = None
 
     if not ms.empty:
-        ms_plot = ms.copy()
-        ms_plot = ms_plot.sort_values("month", ascending=True).tail(6)
+        ms_plot = ms.sort_values("month", ascending=True).tail(6)
         if px is not None:
             fig = px.bar(ms_plot, x="month", y=["receita", "despesa"], barmode="group")
             st.plotly_chart(fig, use_container_width=True)
@@ -76,12 +78,10 @@ def render_dashboard(sb):
 
     st.divider()
 
-    # Receber / Pagar
     r1, r2 = st.columns([1, 1])
-
     with r1:
         st.subheader("Contas a Receber (previsto)")
-        df_r = fetch_receivables(sb, limit=10)
+        df_r = fetch_receivables(limit=10)
         if df_r.empty:
             st.caption("Nenhuma conta a receber prevista.")
         else:
@@ -89,8 +89,9 @@ def render_dashboard(sb):
 
     with r2:
         st.subheader("Contas a Pagar (previsto)")
-        df_p = fetch_payables(sb, limit=10)
+        df_p = fetch_payables(limit=10)
         if df_p.empty:
             st.caption("Nenhuma conta a pagar prevista.")
         else:
             st.dataframe(df_p, use_container_width=True, hide_index=True)
+

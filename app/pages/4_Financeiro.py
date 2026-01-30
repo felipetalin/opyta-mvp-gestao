@@ -25,8 +25,8 @@ except Exception:
 
 
 from finance.access import finance_guard
-from finance.dashboard import render_dashboard
 from finance.data import (
+    set_sb,
     norm,
     api_error_message,
     fetch_projects,
@@ -34,7 +34,10 @@ from finance.data import (
     fetch_counterparties,
     fetch_transactions_view,
     insert_transaction,
+    clear_finance_caches,
 )
+from finance.dashboard import render_dashboard
+
 
 # ==========================================================
 # Boot (ordem obrigatória)
@@ -45,6 +48,7 @@ apply_app_chrome()
 
 require_login()
 sb = get_authed_client()
+set_sb(sb)  # <<< CONSERVADOR: injeta sb no módulo data.py (cache não hasha sb)
 
 user_email = (st.session_state.get("user_email") or "").strip().lower()
 page_header("Financeiro", "Fase 2: dashboard + inserir lançamentos (sem editar/excluir)", user_email)
@@ -52,9 +56,6 @@ page_header("Financeiro", "Fase 2: dashboard + inserir lançamentos (sem editar/
 # Acesso restrito (Felipe + Yuri)
 finance_guard(user_email)
 
-# ==========================================================
-# Constantes
-# ==========================================================
 today = date.today()
 TYPE_OPTIONS = ["RECEITA", "DESPESA", "TRANSFERENCIA"]
 STATUS_OPTIONS = ["PREVISTO", "REALIZADO", "CANCELADO"]
@@ -63,7 +64,7 @@ STATUS_OPTIONS = ["PREVISTO", "REALIZADO", "CANCELADO"]
 # Dashboard (somente leitura)
 # ==========================================================
 try:
-    render_dashboard(sb)
+    render_dashboard()
 except Exception as e:
     st.error("Erro ao carregar dashboard:")
     st.code(api_error_message(e))
@@ -73,9 +74,9 @@ st.divider()
 # ==========================================================
 # Loads dropdowns
 # ==========================================================
-projects_df = fetch_projects(sb)
-categories_df = fetch_categories(sb)
-cp_df = fetch_counterparties(sb)
+projects_df = fetch_projects()
+categories_df = fetch_categories()
+cp_df = fetch_counterparties()
 
 proj_options = ["(Todos)"]
 proj_map: dict[str, str | None] = {"(Todos)": None}
@@ -129,8 +130,7 @@ with st.container(border=True):
         cp_label = st.selectbox("Cliente/Fornecedor", cp_options, index=0)
     with g2:
         if st.button("Recarregar"):
-            # limpeza mínima
-            fetch_transactions_view.clear()
+            clear_finance_caches()
             st.rerun()
 
 f_project_id = proj_map.get(proj_label)
@@ -197,7 +197,7 @@ with st.container(border=True):
             }
 
             try:
-                insert_transaction(sb, payload)
+                insert_transaction(payload)
                 st.success("Lançamento criado.")
                 fetch_transactions_view.clear()
                 st.rerun()
@@ -213,7 +213,6 @@ st.subheader("Lançamentos (somente leitura)")
 
 try:
     df = fetch_transactions_view(
-        sb,
         date_from=date_from,
         date_to=date_to,
         project_id=f_project_id,
