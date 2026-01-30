@@ -24,22 +24,6 @@ except Exception:
             st.caption(f"Logado como: {user_email}")
 
 
-from app.finance.access import finance_guard
-from app.finance.data import (
-    set_sb,
-    norm,
-    api_error_message,
-    fetch_projects,
-    fetch_categories,
-    fetch_counterparties,
-    fetch_transactions_view,
-    insert_transaction,
-    clear_finance_caches,
-)
-from app.finance.dashboard import render_dashboard
-
-
-
 # ==========================================================
 # Boot (ordem obrigatória)
 # ==========================================================
@@ -49,31 +33,277 @@ apply_app_chrome()
 
 require_login()
 sb = get_authed_client()
-set_sb(sb)  # <<< CONSERVADOR: injeta sb no módulo data.py (cache não hasha sb)
 
 user_email = (st.session_state.get("user_email") or "").strip().lower()
-page_header("Financeiro", "Fase 2: dashboard + inserir lançamentos (sem editar/excluir)", user_email)
+page_header("Financeiro", "Dashboard + inserir lançamentos (sem editar/excluir)", user_email)
 
+# ==========================================================
 # Acesso restrito (Felipe + Yuri)
-finance_guard(user_email)
+# ==========================================================
+ALLOWED_FINANCE_EMAILS = {
+    "felipetalin@opyta.com.br",
+    "yurisimoes@opyta.com.br",
+}
+if user_email not in {e.lower() for e in ALLOWED_FINANCE_EMAILS}:
+    st.info("Módulo em implantação (desativado). Em breve.")
+    st.stop()
 
-today = date.today()
+# ==========================================================
+# Helpers
+# ==========================================================
 TYPE_OPTIONS = ["RECEITA", "DESPESA", "TRANSFERENCIA"]
 STATUS_OPTIONS = ["PREVISTO", "REALIZADO", "CANCELADO"]
+today = date.today()
+
+
+def _api_error_message(e: Exception) -> str:
+    try:
+        if getattr(e, "args", None) and len(e.args) > 0 and isinstance(e.args[0], dict):
+            d = e.args[0]
+            msg = d.get("message") or str(d)
+            details = d.get("details")
+            hint = d.get("hint")
+            out = msg
+            if hint:
+                out += f"\nHint: {hint}"
+            if details:
+                out += f"\nDetalhes: {details}"
+            return out
+        return str(e)
+    except Exception:
+        return "Erro desconhecido."
+
+
+def norm(x) -> str:
+    return ("" if x is None else str(x)).strip()
+
+
+def _brl(v: float) -> str:
+    return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def month_range(d: date) -> tuple[date, date]:
+    m0 = date(d.year, d.month, 1)
+    if d.month == 12:
+        m1 = date(d.year + 1, 1, 1)
+    else:
+        m1 = date(d.year, d.month + 1, 1)
+    m_last = (pd.to_datetime(m1) - pd.Timedelta(days=1)).date()
+    return m0, m_last
+
 
 # ==========================================================
-# Dashboard (somente leitura)
+# Cache / fetchs
 # ==========================================================
+@st.cache_data(ttl=30)
+def fetch_projects():
+    res = sb.table("projects").select("id,project_code,name").order("project_code", desc=False).execute()
+    return pd.DataFrame(res.data or [])
+
+
+@st.cache_data(ttl=30)
+def fetch_categories():
+    res = (
+        sb.table("finance_categories")
+        .select("id,name,type,active")
+        .eq("active", True)
+        .order("name", desc=False)
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+@st.cache_data(ttl=30)
+def fetch_counterparties():
+    res = (
+        sb.table("finance_counterparties")
+        .select("id,name,type,active")
+        .eq("active", True)
+        .order("name", desc=False)
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+@st.cache_data(ttl=30)
+def fetch_transactions_view(date_from: date, date_to: date,
+                            project_id: str | None,
+                            t_type: str | None,
+                            status: str | None,
+                            category_id: str | None,
+                            counterparty_id: str | None):
+    q = (
+        sb.from_("v_finance_transactions")
+        .select(
+            "id,date,type,status,description,amount,"
+            "category_id,category_name,"
+            "counterparty_id,counterparty_name,"
+            "project_id,project_code,project_name,"
+            "payment_method,competence_month,notes,created_by"
+        )
+        .gte("date", date_from.isoformat())
+        .lte("date", date_to.isoformat())
+        .order("date", desc=True)
+    )
+
+    if project_id:
+        q = q.eq("project_id", project_id)
+    if t_type:
+        q = q.eq("type", t_type)
+    if status:
+        q = q.eq("status", status)
+    if category_id:
+        q = q.eq("category_id", category_id)
+    if counterparty_id:
+        q = q.eq("counterparty_id", counterparty_id)
+
+    res = q.execute()
+    return pd.DataFrame(res.data or [])
+
+
+def insert_tx(payload: dict):
+    return sb.table("finance_transactions").insert(payload).execute()
+
+
+@st.cache_data(ttl=30)
+def fetch_monthly_summary():
+    res = sb.from_("v_finance_monthly_summary").select("month,receita,despesa,saldo").order("month", desc=False).execute()
+    return pd.DataFrame(res.data or [])
+
+
+@st.cache_data(ttl=30)
+def fetch_tx_min(date_from: date, date_to: date):
+    res = (
+        sb.table("finance_transactions")
+        .select("date,type,status,amount")
+        .gte("date", date_from.isoformat())
+        .lte("date", date_to.isoformat())
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+@st.cache_data(ttl=30)
+def fetch_receivables(limit: int = 10):
+    res = (
+        sb.from_("v_finance_receivables")
+        .select("date,description,amount,counterparty_name,project_code,status")
+        .order("date", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+@st.cache_data(ttl=30)
+def fetch_payables(limit: int = 10):
+    res = (
+        sb.from_("v_finance_payables")
+        .select("date,description,amount,counterparty_name,project_code,status")
+        .order("date", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
+def clear_caches():
+    fetch_projects.clear()
+    fetch_categories.clear()
+    fetch_counterparties.clear()
+    fetch_transactions_view.clear()
+    fetch_monthly_summary.clear()
+    fetch_tx_min.clear()
+    fetch_receivables.clear()
+    fetch_payables.clear()
+
+
+# ==========================================================
+# DASHBOARD v1 (somente leitura)
+# ==========================================================
+st.subheader("Dashboard")
+
 try:
-    render_dashboard()
+    ms = fetch_monthly_summary()
 except Exception as e:
-    st.error("Erro ao carregar dashboard:")
-    st.code(api_error_message(e))
+    st.error("Erro ao carregar resumo mensal:")
+    st.code(_api_error_message(e))
+    ms = pd.DataFrame()
+
+if not ms.empty:
+    ms["month"] = pd.to_datetime(ms["month"]).dt.date
+    month_options = [m.isoformat() for m in sorted(ms["month"].unique(), reverse=True)]
+else:
+    month_options = [today.replace(day=1).isoformat()]
+
+sel_month_str = st.selectbox("Mês (competência)", month_options, index=0, key="dash_month")
+sel_month = pd.to_datetime(sel_month_str).date()
+
+m_from, m_to = month_range(sel_month)
+txm = fetch_tx_min(m_from, m_to)
+
+receita_real = despesa_real = receita_prev = despesa_prev = 0.0
+if not txm.empty:
+    txm["type"] = txm["type"].astype(str).str.upper()
+    txm["status"] = txm["status"].astype(str).str.upper()
+    txm["amount"] = pd.to_numeric(txm["amount"], errors="coerce").fillna(0)
+
+    receita_real = float(txm[(txm["type"] == "RECEITA") & (txm["status"] == "REALIZADO")]["amount"].sum())
+    despesa_real = float(txm[(txm["type"] == "DESPESA") & (txm["status"] == "REALIZADO")]["amount"].sum())
+    receita_prev = float(txm[(txm["type"] == "RECEITA") & (txm["status"] == "PREVISTO")]["amount"].sum())
+    despesa_prev = float(txm[(txm["type"] == "DESPESA") & (txm["status"] == "PREVISTO")]["amount"].sum())
+
+saldo_real = receita_real - despesa_real
+saldo_proj = (receita_real + receita_prev) - (despesa_real + despesa_prev)
+
+c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1, 1])
+c1.metric("Receita (real)", _brl(receita_real))
+c2.metric("Despesa (real)", _brl(despesa_real))
+c3.metric("Saldo (real)", _brl(saldo_real))
+c4.metric("Receita (prev)", _brl(receita_prev))
+c5.metric("Saldo (projetado)", _brl(saldo_proj))
+
+st.divider()
+
+# gráfico mensal (últimos 6 meses)
+try:
+    import plotly.express as px
+except Exception:
+    px = None
+
+if not ms.empty:
+    ms_plot = ms.sort_values("month", ascending=True).tail(6)
+    if px is not None:
+        fig = px.bar(ms_plot, x="month", y=["receita", "despesa"], barmode="group")
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.line_chart(ms_plot.set_index("month")[["receita", "despesa", "saldo"]])
+else:
+    st.caption("Sem dados suficientes para gráfico ainda.")
+
+st.divider()
+
+r1, r2 = st.columns([1, 1])
+with r1:
+    st.subheader("Contas a Receber (previsto)")
+    df_r = fetch_receivables(limit=10)
+    if df_r.empty:
+        st.caption("Nenhuma conta a receber prevista.")
+    else:
+        st.dataframe(df_r, use_container_width=True, hide_index=True)
+
+with r2:
+    st.subheader("Contas a Pagar (previsto)")
+    df_p = fetch_payables(limit=10)
+    if df_p.empty:
+        st.caption("Nenhuma conta a pagar prevista.")
+    else:
+        st.dataframe(df_p, use_container_width=True, hide_index=True)
 
 st.divider()
 
 # ==========================================================
-# Loads dropdowns
+# DROPDOWNS (para filtros + insert)
 # ==========================================================
 projects_df = fetch_projects()
 categories_df = fetch_categories()
@@ -104,7 +334,7 @@ if not cp_df.empty:
         cp_map[label] = norm(r.get("id")) or None
 
 # ==========================================================
-# Filtros
+# FILTROS
 # ==========================================================
 st.subheader("Filtros")
 
@@ -131,7 +361,7 @@ with st.container(border=True):
         cp_label = st.selectbox("Cliente/Fornecedor", cp_options, index=0)
     with g2:
         if st.button("Recarregar"):
-            clear_finance_caches()
+            clear_caches()
             st.rerun()
 
 f_project_id = proj_map.get(proj_label)
@@ -141,7 +371,7 @@ f_category_id = cat_map.get(cat_label)
 f_cp_id = cp_map.get(cp_label)
 
 # ==========================================================
-# Novo lançamento (APENAS INSERT)
+# NOVO LANÇAMENTO (APENAS INSERT)
 # ==========================================================
 st.divider()
 st.subheader("Novo lançamento")
@@ -198,16 +428,16 @@ with st.container(border=True):
             }
 
             try:
-                insert_transaction(payload)
+                insert_tx(payload)
                 st.success("Lançamento criado.")
                 fetch_transactions_view.clear()
                 st.rerun()
             except Exception as e:
                 st.error("Erro ao salvar lançamento:")
-                st.code(api_error_message(e))
+                st.code(_api_error_message(e))
 
 # ==========================================================
-# Lançamentos (somente leitura)
+# LISTA (somente leitura)
 # ==========================================================
 st.divider()
 st.subheader("Lançamentos (somente leitura)")
@@ -224,7 +454,7 @@ try:
     )
 except Exception as e:
     st.error("Erro ao carregar lançamentos:")
-    st.code(api_error_message(e))
+    st.code(_api_error_message(e))
     st.stop()
 
 if df.empty:
@@ -239,3 +469,4 @@ show_cols = [
 show_cols = [c for c in show_cols if c in df.columns]
 
 st.dataframe(df[show_cols], use_container_width=True, hide_index=True)
+
