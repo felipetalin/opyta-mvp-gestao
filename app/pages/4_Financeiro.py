@@ -17,6 +17,7 @@ except Exception:
         return
 
     def page_header(title, subtitle, user_email=""):  # type: ignore
+        st.caption("FINANCE PAGE VERSION: 170476b (dashboard.py UX)")
         st.title(title)
         if subtitle:
             st.caption(subtitle)
