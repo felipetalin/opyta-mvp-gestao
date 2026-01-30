@@ -791,7 +791,7 @@ st.divider()
 # LISTA (EDIÇÃO INLINE + EXCLUSÃO com confirmação)
 # ==========================================================
 st.subheader("Lançamentos (edição inline)")
-st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Para excluir, marque e confirme.")
+st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Para excluir, marque a caixa e confirme.")
 
 try:
     df = fetch_transactions_view(
@@ -813,54 +813,51 @@ if df.empty:
     st.stop()
 
 # -------------------------
-# Normalização FORTE (evita "None" no grid)
+# Normalização base (NUNCA deixar NaN/None virar 'None' na UI)
 # -------------------------
 df2 = df.copy()
 df2["id"] = df2["id"].astype(str)
+
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
 df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
 
-# garante colunas sempre presentes e SEM NaN/None
-for col in ["type", "status", "description", "payment_method", "notes"]:
-    if col not in df2.columns:
-        df2[col] = ""
-    df2[col] = df2[col].fillna("").apply(_clean_str)
-
-# ids relacionais podem vir NaN (float). Mantém como object e preenche depois
-for col in ["category_id", "counterparty_id", "project_id"]:
-    if col not in df2.columns:
-        df2[col] = None
+# garante strings (sem None/Nan/NaT)
+df2["type"] = df2.get("type", "").fillna("").astype(str).str.upper()
+df2["status"] = df2.get("status", "").fillna("").astype(str).str.upper()
+df2["description"] = df2.get("description", "").fillna("").apply(_clean_str)
+df2["payment_method"] = df2.get("payment_method", "").fillna("").apply(_clean_str)
+df2["notes"] = df2.get("notes", "").fillna("").apply(_clean_str)
 
 # -------------------------
-# Options (editor) + placeholders
+# Mapeamentos id -> label (para exibir no editor)
 # -------------------------
-CAT_NONE = "(Sem)"
-CP_NONE = "(Sem)"
-PROJ_NONE = "(Sem)"
-
-# remove "(Todas)/(Todos)" e adiciona "(Sem)"
-cat_options_editor = [CAT_NONE] + [k for k in cat_map.keys() if k != "(Todas)"]
-cp_options_editor = [CP_NONE] + [k for k in cp_map.keys() if k != "(Todas)"]
-proj_options_editor = [PROJ_NONE] + [k for k in proj_map.keys() if k != "(Todos)"]
-
-# Map id -> label (para mostrar no editor)
-cat_label_by_id = {v: k for k, v in cat_map.items() if v}
+cat_label_by_id = {v: k for k, v in cat_map.items() if v}      # id -> label
 cp_label_by_id = {v: k for k, v in cp_map.items() if v}
 proj_label_by_id = {v: k for k, v in proj_map.items() if v}
 
 # -------------------------
+# Opções do editor
+# REGRA: valor da célula PRECISA estar em options.
+# Então usamos "" (vazio) como "(Sem)" e colocamos "" na lista.
+# -------------------------
+cat_options_editor = [""] + [k for k in cat_map.keys() if k != "(Todas)"]
+cp_options_editor = [""] + [k for k in cp_map.keys() if k != "(Todas)"]
+proj_options_editor = [""] + [k for k in proj_map.keys() if k != "(Todos)"]
+
+# -------------------------
 # DataFrame editável (index = id)
+# NUNCA deixe NaN aqui: use "" para campos de selectbox
 # -------------------------
 df_edit = pd.DataFrame(
     {
         "Excluir?": False,
         "Data": df2["date"],
-        "Tipo": df2["type"].astype(str).str.upper().replace({"NAN": ""}).fillna(""),
-        "Status": df2["status"].astype(str).str.upper().replace({"NAN": ""}).fillna(""),
+        "Tipo": df2["type"],
+        "Status": df2["status"],
         "Descrição": df2["description"],
-        "Categoria": df2["category_id"].map(cat_label_by_id).fillna(CAT_NONE),
-        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(CP_NONE),
-        "Projeto": df2["project_id"].map(proj_label_by_id).fillna(PROJ_NONE),
+        "Categoria": df2["category_id"].map(cat_label_by_id).fillna(""),
+        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(""),
+        "Projeto": df2["project_id"].map(proj_label_by_id).fillna(""),
         "Valor": df2["amount"],
         "Pagamento": df2["payment_method"],
         "Obs": df2["notes"],
@@ -868,9 +865,6 @@ df_edit = pd.DataFrame(
     index=df2["id"],
 )
 
-# -------------------------
-# Editor
-# -------------------------
 edited = st.data_editor(
     df_edit,
     key="finance_editor",
@@ -910,7 +904,6 @@ reload_btn = c2.button("Recarregar lançamentos")
 
 if reload_btn:
     clear_caches()
-    # reset do editor (evita grid "preso" em DF antigo)
     if "finance_editor" in st.session_state:
         del st.session_state["finance_editor"]
     if "finance_confirm_delete" in st.session_state:
@@ -918,74 +911,48 @@ if reload_btn:
     st.rerun()
 
 # -------------------------
-# Confirmação em 2 etapas
+# Confirmação de exclusão (2 etapas)
 # -------------------------
 if "finance_confirm_delete" not in st.session_state:
     st.session_state["finance_confirm_delete"] = False
+if "finance_pending_delete_ids" not in st.session_state:
+    st.session_state["finance_pending_delete_ids"] = []
 
-# Detecta ids marcados para excluir (a partir do grid atual)
-delete_ids = [tx_id for tx_id, row in edited.iterrows() if bool(row.get("Excluir?", False))]
-
-if st.session_state["finance_confirm_delete"] and delete_ids:
-    st.warning(
-        f"⚠️ Exclusão pendente: **{len(delete_ids)}** lançamento(s) marcado(s). "
-        "Clique em **Confirmar exclusões** ou **Cancelar**."
-    )
-    b1, b2 = st.columns([1, 1])
-    with b1:
-        confirm_del = st.button("Confirmar exclusões", type="secondary")
-    with b2:
-        cancel_del = st.button("Cancelar", type="tertiary")
-
-    if cancel_del:
-        st.session_state["finance_confirm_delete"] = False
-        # desmarca no editor (evita armadilha)
-        tmp = edited.copy()
-        if "Excluir?" in tmp.columns:
-            tmp["Excluir?"] = False
-        # injeta no state do editor
-        st.session_state["finance_editor"] = tmp
-        st.rerun()
-
-    if confirm_del:
-        # mantém a flag e pede pra clicar salvar (sem deletar no clique do confirm)
-        st.info("Agora clique em **Salvar alterações** para aplicar as exclusões confirmadas.")
-        st.stop()
-
-# -------------------------
-# SALVAR (updates + delete confirmada)
-# -------------------------
 if save_btn:
     before = df_edit.copy()
     after = edited.copy()
 
-    delete_ids_now = [tx_id for tx_id, row in after.iterrows() if bool(row.get("Excluir?", False))]
+    delete_ids = [tx_id for tx_id, row in after.iterrows() if bool(row.get("Excluir?", False))]
 
-    # Se marcou exclusão e ainda não confirmou, ativa confirmação e para
-    if delete_ids_now and not st.session_state["finance_confirm_delete"]:
+    # etapa 1: pedir confirmação
+    if delete_ids and not st.session_state["finance_confirm_delete"]:
         st.session_state["finance_confirm_delete"] = True
+        st.session_state["finance_pending_delete_ids"] = delete_ids
         st.warning(
-            f"Você marcou **{len(delete_ids_now)}** lançamento(s) para excluir. "
-            "Clique em **Confirmar exclusões** para prosseguir, ou **Cancelar**."
+            f"Você marcou **{len(delete_ids)}** lançamento(s) para excluir. "
+            "Clique em **Confirmar exclusões** para apagar de verdade."
         )
         st.stop()
 
+    # etapa 2: executar (se confirmado)
     n_updates = 0
     n_deletes = 0
     warnings: list[str] = []
 
-    # 1) Deleções (somente se confirmou)
-    if st.session_state["finance_confirm_delete"] and delete_ids_now:
-        for tx_id in delete_ids_now:
+    confirmed_delete_ids = st.session_state["finance_pending_delete_ids"] if st.session_state["finance_confirm_delete"] else []
+
+    # deletar confirmados
+    if confirmed_delete_ids:
+        for tx_id in confirmed_delete_ids:
             try:
                 sb.table("finance_transactions").delete().eq("id", tx_id).execute()
                 n_deletes += 1
             except Exception as e:
                 warnings.append(f"Erro ao excluir {tx_id}: {_api_error_message(e)}")
 
-    # 2) Updates (somente itens NÃO excluídos)
+    # updates: apenas não deletados
     for tx_id, ra in after.iterrows():
-        if tx_id in delete_ids_now:
+        if tx_id in confirmed_delete_ids:
             continue
 
         rb = before.loc[tx_id]
@@ -1018,9 +985,10 @@ if save_btn:
             "status": ra["Status"],
             "description": norm(ra["Descrição"]),
             "amount": float(ra["Valor"]),
-            "category_id": None if ra["Categoria"] == CAT_NONE else cat_map.get(ra["Categoria"]),
-            "counterparty_id": None if ra["Cliente/Fornecedor"] == CP_NONE else cp_map.get(ra["Cliente/Fornecedor"]),
-            "project_id": None if ra["Projeto"] == PROJ_NONE else proj_map.get(ra["Projeto"]),
+            # "" => None no banco
+            "category_id": cat_map.get(ra["Categoria"]) if ra["Categoria"] else None,
+            "counterparty_id": cp_map.get(ra["Cliente/Fornecedor"]) if ra["Cliente/Fornecedor"] else None,
+            "project_id": proj_map.get(ra["Projeto"]) if ra["Projeto"] else None,
             "payment_method": norm(ra["Pagamento"]) or None,
             "notes": norm(ra["Obs"]) or None,
         }
@@ -1031,14 +999,24 @@ if save_btn:
         except Exception as e:
             warnings.append(f"Erro ao atualizar {tx_id}: {_api_error_message(e)}")
 
-    # reseta confirmação sempre que salvar
+    # limpa confirmação
     st.session_state["finance_confirm_delete"] = False
+    st.session_state["finance_pending_delete_ids"] = []
 
     if warnings:
         st.warning("\n".join(warnings))
 
     st.success(f"Atualizados: {n_updates} • Excluídos: {n_deletes}")
     clear_caches()
-    if "finance_editor" in st.session_state:
-        del st.session_state["finance_editor"]
     st.rerun()
+
+# Botões da 2ª etapa (só aparece quando tem pendência)
+if st.session_state.get("finance_confirm_delete", False):
+    b1, b2 = st.columns([1, 1])
+    if b1.button("Confirmar exclusões", type="secondary"):
+        st.info("Agora clique em **Salvar alterações** para aplicar as exclusões confirmadas.")
+    if b2.button("Cancelar exclusões", type="tertiary"):
+        st.session_state["finance_confirm_delete"] = False
+        st.session_state["finance_pending_delete_ids"] = []
+        st.rerun()
+
