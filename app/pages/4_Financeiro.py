@@ -833,12 +833,16 @@ with st.container(border=True):
 
 st.divider()
 
-
 # ==========================================================
-# LISTA (EDIÇÃO INLINE + EXCLUSÃO COM CONFIRMAÇÃO SIMPLES)
+# LISTA (EDIÇÃO INLINE + EXCLUSÃO)
 # ==========================================================
 st.subheader("Lançamentos (edição inline)")
 st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Para excluir, marque e confirme.")
+
+# sempre resetar o editor quando recarregar dados
+def _reset_editor_state():
+    if "finance_editor" in st.session_state:
+        del st.session_state["finance_editor"]
 
 try:
     df = fetch_transactions_view(
@@ -859,45 +863,68 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
+# -------------------------
+# Normalização FORTE
+# -------------------------
 df2 = df.copy()
+
+# garante colunas mínimas
+need_cols = [
+    "id", "date", "type", "status", "description", "amount",
+    "category_id", "counterparty_id", "project_id",
+    "payment_method", "notes"
+]
+for c in need_cols:
+    if c not in df2.columns:
+        df2[c] = None
+
 df2["id"] = df2["id"].astype(str)
+
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
+df2["type"] = df2["type"].fillna("").astype(str).str.upper().apply(_clean_str)
+df2["status"] = df2["status"].fillna("").astype(str).str.upper().apply(_clean_str)
+df2["description"] = df2["description"].fillna("").astype(str).apply(_clean_str)
+
 df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
 
-for col in ["type", "status", "description", "payment_method", "notes", "category_name", "counterparty_name", "project_code", "project_name"]:
-    if col not in df2.columns:
-        df2[col] = ""
-    df2[col] = df2[col].fillna("").apply(_clean_str)
+df2["payment_method"] = df2["payment_method"].fillna("").astype(str).apply(_clean_str)
+df2["notes"] = df2["notes"].fillna("").astype(str).apply(_clean_str)
 
-# placeholders
+# -------------------------
+# Options / maps
+# -------------------------
 CAT_NONE = "(Sem)"
 CP_NONE = "(Sem)"
 PROJ_NONE = "(Sem)"
 
 cat_options_editor = [CAT_NONE] + [k for k in cat_map.keys() if k != "(Todas)"]
-cp_options_editor = [CP_NONE] + [k for k in cp_map.keys() if k != "(Todas)"]
-proj_options_editor = [PROJ_NONE] + [k for k in proj_map.keys() if k != "(Todos)"]
+cp_options_editor  = [CP_NONE]  + [k for k in cp_map.keys() if k != "(Todas)"]
+proj_options_editor= [PROJ_NONE]+ [k for k in proj_map.keys() if k != "(Todos)"]
 
 cat_label_by_id = {v: k for k, v in cat_map.items() if v}
-cp_label_by_id = {v: k for k, v in cp_map.items() if v}
-proj_label_by_id = {v: k for k, v in proj_map.items() if v}
+cp_label_by_id  = {v: k for k, v in cp_map.items() if v}
+proj_label_by_id= {v: k for k, v in proj_map.items() if v}
 
-df_edit = pd.DataFrame(
-    {
-        "Excluir?": False,
-        "Data": df2["date"],
-        "Tipo": df2["type"].astype(str).str.upper(),
-        "Status": df2["status"].astype(str).str.upper(),
-        "Descrição": df2["description"],
-        "Categoria": df2["category_id"].map(cat_label_by_id).fillna(CAT_NONE),
-        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(CP_NONE),
-        "Projeto": df2["project_id"].map(proj_label_by_id).fillna(PROJ_NONE),
-        "Valor": df2["amount"],
-        "Pagamento": df2["payment_method"],
-        "Obs": df2["notes"],
-    },
-    index=df2["id"],
-)
+# -------------------------
+# DataFrame editável
+# IMPORTANTÍSSIMO:
+# - NÃO usar id como index do editor
+# - manter id como coluna oculta (não listada no column_order)
+# -------------------------
+df_edit = pd.DataFrame({
+    "id": df2["id"],  # coluna oculta (não aparecerá no grid)
+    "Excluir?": False,
+    "Data": df2["date"],
+    "Tipo": df2["type"],
+    "Status": df2["status"],
+    "Descrição": df2["description"],
+    "Categoria": df2["category_id"].map(cat_label_by_id).fillna(CAT_NONE),
+    "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(CP_NONE),
+    "Projeto": df2["project_id"].map(proj_label_by_id).fillna(PROJ_NONE),
+    "Valor": df2["amount"],
+    "Pagamento": df2["payment_method"],
+    "Obs": df2["notes"],
+}).reset_index(drop=True)
 
 edited = st.data_editor(
     df_edit,
@@ -932,17 +959,18 @@ edited = st.data_editor(
     },
 )
 
-c1, c2, c3 = st.columns([1, 1, 2])
+c1, c2 = st.columns([1, 1])
 save_btn = c1.button("Salvar alterações", type="primary")
 reload_btn = c2.button("Recarregar lançamentos")
 
 if reload_btn:
     clear_caches()
-    if "finance_editor" in st.session_state:
-        del st.session_state["finance_editor"]
+    _reset_editor_state()
     st.rerun()
 
-delete_ids = [tx_id for tx_id, row in edited.iterrows() if bool(row.get("Excluir?", False))]
+delete_rows = edited[edited["Excluir?"] == True]  # noqa: E712
+delete_ids = delete_rows["id"].tolist()
+
 confirm_delete = False
 if delete_ids:
     confirm_delete = st.checkbox(f"Confirmar exclusão de {len(delete_ids)} lançamento(s)", value=False)
@@ -955,7 +983,7 @@ if save_btn:
     n_updates = 0
     n_deletes = 0
 
-    # 1) deletar (somente se confirmou checkbox)
+    # 1) deletes
     if delete_ids:
         if not confirm_delete:
             st.warning("Você marcou exclusões. Marque a checkbox de confirmação para apagar de verdade.")
@@ -969,43 +997,42 @@ if save_btn:
                 warnings.append(f"Erro ao excluir {tx_id}: {_api_error_message(e)}")
 
     # 2) updates
-    for tx_id, ra in after.iterrows():
-        if tx_id in delete_ids:
+    # compara linha a linha pelo índice do DF (estável) e pega o tx_id na coluna
+    for i in range(len(after)):
+        if after.loc[i, "id"] in delete_ids:
             continue
 
-        rb = before.loc[tx_id]
-
         changed = False
-        for c in before.columns:
-            if c == "Excluir?":
-                continue
-            if norm(rb[c]) != norm(ra[c]):
+        for col in ["Data", "Tipo", "Status", "Descrição", "Categoria", "Cliente/Fornecedor", "Projeto", "Valor", "Pagamento", "Obs"]:
+            if norm(before.loc[i, col]) != norm(after.loc[i, col]):
                 changed = True
                 break
         if not changed:
             continue
 
-        if ra["Data"] is None:
+        tx_id = after.loc[i, "id"]
+
+        if after.loc[i, "Data"] is None:
             warnings.append(f"{tx_id}: Data vazia (update ignorado).")
             continue
-        if float(ra["Valor"]) <= 0:
+        if float(after.loc[i, "Valor"]) <= 0:
             warnings.append(f"{tx_id}: Valor deve ser > 0 (update ignorado).")
             continue
-        if norm(ra["Descrição"]) == "":
+        if norm(after.loc[i, "Descrição"]) == "":
             warnings.append(f"{tx_id}: Descrição obrigatória (update ignorado).")
             continue
 
         payload = {
-            "date": ra["Data"].isoformat() if ra["Data"] else None,
-            "type": ra["Tipo"],
-            "status": ra["Status"],
-            "description": norm(ra["Descrição"]),
-            "amount": float(ra["Valor"]),
-            "category_id": None if ra["Categoria"] == CAT_NONE else cat_map.get(ra["Categoria"]),
-            "counterparty_id": None if ra["Cliente/Fornecedor"] == CP_NONE else cp_map.get(ra["Cliente/Fornecedor"]),
-            "project_id": None if ra["Projeto"] == PROJ_NONE else proj_map.get(ra["Projeto"]),
-            "payment_method": norm(ra["Pagamento"]) or None,
-            "notes": norm(ra["Obs"]) or None,
+            "date": after.loc[i, "Data"].isoformat(),
+            "type": after.loc[i, "Tipo"],
+            "status": after.loc[i, "Status"],
+            "description": norm(after.loc[i, "Descrição"]),
+            "amount": float(after.loc[i, "Valor"]),
+            "category_id": None if after.loc[i, "Categoria"] == CAT_NONE else cat_map.get(after.loc[i, "Categoria"]),
+            "counterparty_id": None if after.loc[i, "Cliente/Fornecedor"] == CP_NONE else cp_map.get(after.loc[i, "Cliente/Fornecedor"]),
+            "project_id": None if after.loc[i, "Projeto"] == PROJ_NONE else proj_map.get(after.loc[i, "Projeto"]),
+            "payment_method": norm(after.loc[i, "Pagamento"]) or None,
+            "notes": norm(after.loc[i, "Obs"]) or None,
         }
 
         try:
@@ -1019,8 +1046,5 @@ if save_btn:
 
     st.success(f"Atualizados: {n_updates} • Excluídos: {n_deletes}")
     clear_caches()
-    if "finance_editor" in st.session_state:
-        del st.session_state["finance_editor"]
+    _reset_editor_state()
     st.rerun()
-
-
