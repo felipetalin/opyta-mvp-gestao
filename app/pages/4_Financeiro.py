@@ -104,17 +104,13 @@ def _pct(curr: float, prev: float) -> str:
     arrow = "↑" if p >= 0 else "↓"
     return f"{arrow} {abs(p):.1f}%"
 
+
 # ==========================================================
 # Cache / fetchs
 # ==========================================================
 @st.cache_data(ttl=30)
 def fetch_projects():
-    res = (
-        sb.table("projects")
-        .select("id,project_code,name")
-        .order("project_code", desc=False)
-        .execute()
-    )
+    res = sb.table("projects").select("id,project_code,name").order("project_code", desc=False).execute()
     return pd.DataFrame(res.data or [])
 
 
@@ -154,9 +150,12 @@ def fetch_transactions_view(
 ):
     """
     IMPORTANTE:
-    - Não usar v_finance_transactions aqui, porque ela está retornando NULL/None.
-    - Busca direto da tabela real finance_transactions (fonte de verdade).
-    - Mantém a assinatura para não quebrar o restante do arquivo.
+    - A lista NÃO depende de v_finance_transactions.
+    - Busca na tabela finance_transactions e enriquece nomes via merge (cache local).
+    Isso evita:
+      • view desatualizada
+      • RLS/joins te enganando
+      • colunas *_name faltando
     """
     q = (
         sb.table("finance_transactions")
@@ -184,24 +183,46 @@ def fetch_transactions_view(
     res = q.execute()
     df = pd.DataFrame(res.data or [])
 
-    # Garantia: colunas sempre presentes (evita KeyError / editor mostrar None estranho)
-    for c in [
-        "id",
-        "date",
-        "type",
-        "status",
-        "description",
-        "amount",
-        "category_id",
-        "counterparty_id",
-        "project_id",
-        "payment_method",
-        "competence_month",
-        "notes",
-        "created_by",
-    ]:
-        if c not in df.columns:
-            df[c] = None
+    # Mesmo vazio: devolve no "formato esperado"
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "id", "date", "type", "status", "description", "amount",
+                "category_id", "category_name",
+                "counterparty_id", "counterparty_name",
+                "project_id", "project_code", "project_name",
+                "payment_method", "competence_month", "notes", "created_by",
+            ]
+        )
+
+    # Enriquecimento (nomes)
+    cats = fetch_categories()
+    cps = fetch_counterparties()
+    projs = fetch_projects()
+
+    if not cats.empty:
+        cats2 = cats[["id", "name"]].rename(columns={"id": "category_id", "name": "category_name"})
+        df = df.merge(cats2, on="category_id", how="left")
+    else:
+        df["category_name"] = None
+
+    if not cps.empty:
+        cps2 = cps[["id", "name"]].rename(columns={"id": "counterparty_id", "name": "counterparty_name"})
+        df = df.merge(cps2, on="counterparty_id", how="left")
+    else:
+        df["counterparty_name"] = None
+
+    if not projs.empty:
+        projs2 = projs[["id", "project_code", "name"]].rename(columns={"id": "project_id", "name": "project_name"})
+        df = df.merge(projs2, on="project_id", how="left")
+    else:
+        df["project_code"] = None
+        df["project_name"] = None
+
+    # Higiene
+    for col in ["description", "payment_method", "notes"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").apply(_clean_str)
 
     return df
 
@@ -299,9 +320,7 @@ st.markdown(
   text-overflow: ellipsis; max-width: 520px; }
 .op-chip { padding: 6px 10px; border-radius: 999px; font-weight: 800; font-size: 12px;
   color: #fff; white-space: nowrap; }
-.op-chip-green { background: #2f7d55; }
 .op-chip-orange{ background: #c66b10; }
-.op-chip-gray  { background: #555; }
 
 @media (max-width: 1100px) {
   .op-cards { grid-template-columns: repeat(2, 1fr); }
@@ -315,7 +334,6 @@ st.markdown(
 """,
     unsafe_allow_html=True,
 )
-
 
 # ==========================================================
 # DROPDOWNS (para filtros + insert + editor)
@@ -378,10 +396,9 @@ with st.container(border=True):
     with g2:
         if st.button("Recarregar"):
             clear_caches()
+            # reset correto do editor: APAGA a chave do widget, não injeta df
             if "finance_editor" in st.session_state:
                 del st.session_state["finance_editor"]
-            if "finance_confirm_delete" in st.session_state:
-                del st.session_state["finance_confirm_delete"]
             st.rerun()
 
 f_project_id = proj_map.get(proj_label)
@@ -806,6 +823,7 @@ with st.container(border=True):
                 insert_tx(payload)
                 st.success("Lançamento criado.")
                 clear_caches()
+                # reset correto do editor (se estiver aberto)
                 if "finance_editor" in st.session_state:
                     del st.session_state["finance_editor"]
                 st.rerun()
@@ -817,10 +835,10 @@ st.divider()
 
 
 # ==========================================================
-# LISTA (EDIÇÃO INLINE + EXCLUSÃO com confirmação)
+# LISTA (EDIÇÃO INLINE + EXCLUSÃO COM CONFIRMAÇÃO SIMPLES)
 # ==========================================================
 st.subheader("Lançamentos (edição inline)")
-st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Para excluir, marque a caixa e confirme.")
+st.caption("✏️ Edite na tabela e clique em **Salvar alterações**. Para excluir, marque e confirme.")
 
 try:
     df = fetch_transactions_view(
@@ -841,96 +859,39 @@ if df.empty:
     st.info("Nenhum lançamento encontrado para os filtros.")
     st.stop()
 
-    # --- Guardrail: a view precisa trazer essas colunas
-required_cols = ["id", "date", "type", "status", "description", "amount", "category_id", "counterparty_id", "project_id"]
-missing = [c for c in required_cols if c not in df.columns]
-if missing:
-    st.error("A view v_finance_transactions não retornou colunas obrigatórias.")
-    st.code(f"Faltando: {missing}\nColunas retornadas: {list(df.columns)}")
-    st.stop()
-
-# --- Remove linhas fantasmas (quando a view retorna tudo NULL por join/bug)
-df = df.copy()
-
-# remove id nulo/vazio
-df["id"] = df["id"].astype(str)
-df = df[df["id"].notna() & (df["id"].str.strip() != "")]
-
-# remove linhas onde TODO o conteúdo é nulo/zero/vazio (linha fantasma)
-ghost_mask = (
-    df["date"].isna()
-    & df["type"].isna()
-    & df["status"].isna()
-    & df["description"].isna()
-    & df["amount"].isna()
-    & df["category_id"].isna()
-    & df["counterparty_id"].isna()
-    & df["project_id"].isna()
-)
-
-df = df[~ghost_mask]
-
-if df.empty:
-    st.info("A consulta retornou apenas linhas nulas (provável linha fantasma na view).")
-    st.stop()
-
-
-# -------------------------
-# Normalização base (NUNCA deixar NaN/None virar 'None' na UI)
-# -------------------------
 df2 = df.copy()
-
-df2["id"] = df2["id"].astype(str).str.strip()
-df2 = df2[df2["id"] != ""]
-
-# mata "None"/"nan" string na origem
-for c in ["type", "status", "description", "payment_method", "notes"]:
-    if c in df2.columns:
-        df2[c] = df2[c].apply(_clean_str)
-
+df2["id"] = df2["id"].astype(str)
 df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
 df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
 
+for col in ["type", "status", "description", "payment_method", "notes", "category_name", "counterparty_name", "project_code", "project_name"]:
+    if col not in df2.columns:
+        df2[col] = ""
+    df2[col] = df2[col].fillna("").apply(_clean_str)
 
+# placeholders
+CAT_NONE = "(Sem)"
+CP_NONE = "(Sem)"
+PROJ_NONE = "(Sem)"
 
+cat_options_editor = [CAT_NONE] + [k for k in cat_map.keys() if k != "(Todas)"]
+cp_options_editor = [CP_NONE] + [k for k in cp_map.keys() if k != "(Todas)"]
+proj_options_editor = [PROJ_NONE] + [k for k in proj_map.keys() if k != "(Todos)"]
 
-# garante strings (sem None/Nan/NaT)
-df2["type"] = df2.get("type", "").fillna("").astype(str).str.upper()
-df2["status"] = df2.get("status", "").fillna("").astype(str).str.upper()
-df2["description"] = df2.get("description", "").fillna("").apply(_clean_str)
-df2["payment_method"] = df2.get("payment_method", "").fillna("").apply(_clean_str)
-df2["notes"] = df2.get("notes", "").fillna("").apply(_clean_str)
-
-# -------------------------
-# Mapeamentos id -> label (para exibir no editor)
-# -------------------------
-cat_label_by_id = {v: k for k, v in cat_map.items() if v}      # id -> label
+cat_label_by_id = {v: k for k, v in cat_map.items() if v}
 cp_label_by_id = {v: k for k, v in cp_map.items() if v}
 proj_label_by_id = {v: k for k, v in proj_map.items() if v}
 
-# -------------------------
-# Opções do editor
-# REGRA: valor da célula PRECISA estar em options.
-# Então usamos "" (vazio) como "(Sem)" e colocamos "" na lista.
-# -------------------------
-cat_options_editor = [""] + [k for k in cat_map.keys() if k != "(Todas)"]
-cp_options_editor = [""] + [k for k in cp_map.keys() if k != "(Todas)"]
-proj_options_editor = [""] + [k for k in proj_map.keys() if k != "(Todos)"]
-
-# -------------------------
-# DataFrame editável (index = id)
-# NUNCA deixe NaN aqui: use "" para campos de selectbox
-# -------------------------
 df_edit = pd.DataFrame(
     {
         "Excluir?": False,
         "Data": df2["date"],
-        "Tipo": df2["type"],
-        "Status": df2["status"],
+        "Tipo": df2["type"].astype(str).str.upper(),
+        "Status": df2["status"].astype(str).str.upper(),
         "Descrição": df2["description"],
-        "Categoria": df2["category_id"].map(cat_label_by_id).fillna(""),
-        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(""),
-        "Projeto": df2["project_id"].map(proj_label_by_id).fillna(""),
+        "Categoria": df2["category_id"].map(cat_label_by_id).fillna(CAT_NONE),
+        "Cliente/Fornecedor": df2["counterparty_id"].map(cp_label_by_id).fillna(CP_NONE),
+        "Projeto": df2["project_id"].map(proj_label_by_id).fillna(PROJ_NONE),
         "Valor": df2["amount"],
         "Pagamento": df2["payment_method"],
         "Obs": df2["notes"],
@@ -971,7 +932,7 @@ edited = st.data_editor(
     },
 )
 
-c1, c2 = st.columns([1, 1])
+c1, c2, c3 = st.columns([1, 1, 2])
 save_btn = c1.button("Salvar alterações", type="primary")
 reload_btn = c2.button("Recarregar lançamentos")
 
@@ -979,58 +940,41 @@ if reload_btn:
     clear_caches()
     if "finance_editor" in st.session_state:
         del st.session_state["finance_editor"]
-    if "finance_confirm_delete" in st.session_state:
-        del st.session_state["finance_confirm_delete"]
     st.rerun()
 
-# -------------------------
-# Confirmação de exclusão (2 etapas)
-# -------------------------
-if "finance_confirm_delete" not in st.session_state:
-    st.session_state["finance_confirm_delete"] = False
-if "finance_pending_delete_ids" not in st.session_state:
-    st.session_state["finance_pending_delete_ids"] = []
+delete_ids = [tx_id for tx_id, row in edited.iterrows() if bool(row.get("Excluir?", False))]
+confirm_delete = False
+if delete_ids:
+    confirm_delete = st.checkbox(f"Confirmar exclusão de {len(delete_ids)} lançamento(s)", value=False)
 
 if save_btn:
     before = df_edit.copy()
     after = edited.copy()
 
-    delete_ids = [tx_id for tx_id, row in after.iterrows() if bool(row.get("Excluir?", False))]
-
-    # etapa 1: pedir confirmação
-    if delete_ids and not st.session_state["finance_confirm_delete"]:
-        st.session_state["finance_confirm_delete"] = True
-        st.session_state["finance_pending_delete_ids"] = delete_ids
-        st.warning(
-            f"Você marcou **{len(delete_ids)}** lançamento(s) para excluir. "
-            "Clique em **Confirmar exclusões** para apagar de verdade."
-        )
-        st.stop()
-
-    # etapa 2: executar (se confirmado)
+    warnings: list[str] = []
     n_updates = 0
     n_deletes = 0
-    warnings: list[str] = []
 
-    confirmed_delete_ids = st.session_state["finance_pending_delete_ids"] if st.session_state["finance_confirm_delete"] else []
+    # 1) deletar (somente se confirmou checkbox)
+    if delete_ids:
+        if not confirm_delete:
+            st.warning("Você marcou exclusões. Marque a checkbox de confirmação para apagar de verdade.")
+            st.stop()
 
-    # deletar confirmados
-    if confirmed_delete_ids:
-        for tx_id in confirmed_delete_ids:
+        for tx_id in delete_ids:
             try:
                 sb.table("finance_transactions").delete().eq("id", tx_id).execute()
                 n_deletes += 1
             except Exception as e:
                 warnings.append(f"Erro ao excluir {tx_id}: {_api_error_message(e)}")
 
-    # updates: apenas não deletados
+    # 2) updates
     for tx_id, ra in after.iterrows():
-        if tx_id in confirmed_delete_ids:
+        if tx_id in delete_ids:
             continue
 
         rb = before.loc[tx_id]
 
-        # Mudou algo?
         changed = False
         for c in before.columns:
             if c == "Excluir?":
@@ -1041,7 +985,6 @@ if save_btn:
         if not changed:
             continue
 
-        # Validações mínimas
         if ra["Data"] is None:
             warnings.append(f"{tx_id}: Data vazia (update ignorado).")
             continue
@@ -1058,10 +1001,9 @@ if save_btn:
             "status": ra["Status"],
             "description": norm(ra["Descrição"]),
             "amount": float(ra["Valor"]),
-            # "" => None no banco
-            "category_id": cat_map.get(ra["Categoria"]) if ra["Categoria"] else None,
-            "counterparty_id": cp_map.get(ra["Cliente/Fornecedor"]) if ra["Cliente/Fornecedor"] else None,
-            "project_id": proj_map.get(ra["Projeto"]) if ra["Projeto"] else None,
+            "category_id": None if ra["Categoria"] == CAT_NONE else cat_map.get(ra["Categoria"]),
+            "counterparty_id": None if ra["Cliente/Fornecedor"] == CP_NONE else cp_map.get(ra["Cliente/Fornecedor"]),
+            "project_id": None if ra["Projeto"] == PROJ_NONE else proj_map.get(ra["Projeto"]),
             "payment_method": norm(ra["Pagamento"]) or None,
             "notes": norm(ra["Obs"]) or None,
         }
@@ -1072,24 +1014,13 @@ if save_btn:
         except Exception as e:
             warnings.append(f"Erro ao atualizar {tx_id}: {_api_error_message(e)}")
 
-    # limpa confirmação
-    st.session_state["finance_confirm_delete"] = False
-    st.session_state["finance_pending_delete_ids"] = []
-
     if warnings:
         st.warning("\n".join(warnings))
 
     st.success(f"Atualizados: {n_updates} • Excluídos: {n_deletes}")
     clear_caches()
+    if "finance_editor" in st.session_state:
+        del st.session_state["finance_editor"]
     st.rerun()
 
-# Botões da 2ª etapa (só aparece quando tem pendência)
-if st.session_state.get("finance_confirm_delete", False):
-    b1, b2 = st.columns([1, 1])
-    if b1.button("Confirmar exclusões", type="secondary"):
-        st.info("Agora clique em **Salvar alterações** para aplicar as exclusões confirmadas.")
-    if b2.button("Cancelar exclusões", type="tertiary"):
-        st.session_state["finance_confirm_delete"] = False
-        st.session_state["finance_pending_delete_ids"] = []
-        st.rerun()
 
