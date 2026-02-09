@@ -1,9 +1,14 @@
-name: gcal-sync
+name: GCAL Sync
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"  # a cada 10 minutos (UTC)
+    # a cada 30 min
+    - cron: "*/30 * * * *"
+
+concurrency:
+  group: gcal-sync
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -19,36 +24,25 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install deps (sync only)
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-sync.txt
 
-      - name: Write Service Account JSON
+      - name: Write Google Service Account JSON
         run: |
           mkdir -p secrets_gcal
-          python - <<'PY'
-          import os, json, pathlib
-          s = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_TEXT", "")
-          if not s:
-            raise SystemExit("Missing GOOGLE_SERVICE_ACCOUNT_JSON_TEXT secret")
-          p = pathlib.Path("secrets_gcal/service-account-gcal.json")
-          p.write_text(s, encoding="utf-8")
-          print("Wrote", p)
-          PY
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON_TEXT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_TEXT }}
+          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > secrets_gcal/service-account-gcal.json
 
-      - name: Run sync
-        run: |
-          python scripts/gcal/sync_gcal.py
+      - name: Run Sync
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
-
           GOOGLE_SERVICE_ACCOUNT_JSON: ./secrets_gcal/service-account-gcal.json
           GOOGLE_SCOPES: https://www.googleapis.com/auth/calendar
-          GOOGLE_CALENDAR_ID: primary
-
           SYNC_LOOKBACK_DAYS: "365"
           FALLBACK_OWNER_EMAIL: felipetalin@opyta.com.br
+          FORCE_PUSH_ALL: "0"
+          GCAL_COLOR_MAP: "Felipe Normando:11,Yuri Martins:5,Ana Clara:2,Ismayllen Masson:7,Wilder Bento:9"
+        run: |
+          python scripts/gcal/sync_gcal.py

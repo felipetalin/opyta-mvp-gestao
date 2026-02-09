@@ -21,3 +21,13 @@ secrets_gcal/
 secrets/
 *.json
 
+
+.env
+.env.*
+secrets/
+secrets_gcal/
+*.json
+.venv/
+__pycache__/
+*.pyc
+
