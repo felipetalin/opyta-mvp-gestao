@@ -1,0 +1,54 @@
+name: gcal-sync
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"  # a cada 10 minutos (UTC)
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps (sync only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-sync.txt
+
+      - name: Write Service Account JSON
+        run: |
+          mkdir -p secrets_gcal
+          python - <<'PY'
+          import os, json, pathlib
+          s = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON_TEXT", "")
+          if not s:
+            raise SystemExit("Missing GOOGLE_SERVICE_ACCOUNT_JSON_TEXT secret")
+          p = pathlib.Path("secrets_gcal/service-account-gcal.json")
+          p.write_text(s, encoding="utf-8")
+          print("Wrote", p)
+          PY
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON_TEXT: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON_TEXT }}
+
+      - name: Run sync
+        run: |
+          python scripts/gcal/sync_gcal.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+
+          GOOGLE_SERVICE_ACCOUNT_JSON: ./secrets_gcal/service-account-gcal.json
+          GOOGLE_SCOPES: https://www.googleapis.com/auth/calendar
+          GOOGLE_CALENDAR_ID: primary
+
+          SYNC_LOOKBACK_DAYS: "365"
+          FALLBACK_OWNER_EMAIL: felipetalin@opyta.com.br

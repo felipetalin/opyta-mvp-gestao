@@ -12,3 +12,12 @@ __pycache__/
 .env
 .env.*
 **/.env
+
+secrets/
+*.json
+
+
+secrets_gcal/
+secrets/
+*.json
+

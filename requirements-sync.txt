@@ -1,0 +1,5 @@
+google-api-python-client==2.179.0
+google-auth==2.34.0
+python-dotenv==1.0.1
+python-dateutil==2.9.0.post0
+supabase==2.6.0
