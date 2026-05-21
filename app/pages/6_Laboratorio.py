@@ -179,8 +179,22 @@ def load_people(_k: str) -> pd.DataFrame:
     return pd.DataFrame(res.data or [])
 
 
+@st.cache_data(ttl=300)
+def load_sample_types(_k: str) -> pd.DataFrame:
+    res = (
+        sb.table("lab_sample_types")
+        .select("id, name, active, sort_order")
+        .eq("active", True)
+        .order("sort_order")
+        .order("name")
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
 def refresh():
     load_samples.clear()
+    load_sample_types.clear()
 
 
 # ==========================================================
@@ -188,10 +202,22 @@ def refresh():
 # ==========================================================
 df_projects = load_projects(cache_key)
 df_people = load_people(cache_key)
+df_types = load_sample_types(cache_key)
+
+# Mapas auxiliares de tipos
+type_name_to_id: dict[str, str] = (
+    {str(r["name"]): r["id"] for _, r in df_types.iterrows()} if not df_types.empty else {}
+)
+type_names_sorted = list(type_name_to_id.keys())
 
 with st.expander("➕ Nova entrega de amostras", expanded=False):
     if df_projects.empty:
         st.warning("Nenhum projeto cadastrado. Cadastre projetos antes.")
+    elif not type_names_sorted:
+        st.warning(
+            "Nenhum tipo de amostra cadastrado. Rode a migração "
+            "`2026_05_21_lab_samples_v2.sql` no Supabase."
+        )
     else:
         proj_options = {
             f"{row['project_code']} — {row['name']}": row["id"]
@@ -205,7 +231,7 @@ with st.expander("➕ Nova entrega de amostras", expanded=False):
             f1, f2 = st.columns(2)
             with f1:
                 proj_label = st.selectbox("Projeto *", list(proj_options.keys()))
-                sample_type = st.text_input("Tipo de amostra *", placeholder="Ex.: Água superficial, Sedimento, Ictiofauna...")
+                sample_type_name = st.selectbox("Tipo de amostra *", type_names_sorted)
                 shipment = st.date_input(
                     "Data de entrega das amostras",
                     value=date.today(),
@@ -234,13 +260,15 @@ with st.expander("➕ Nova entrega de amostras", expanded=False):
 
             submitted = st.form_submit_button("Salvar entrega", type="primary")
             if submitted:
-                if not sample_type.strip():
-                    st.error("Informe o tipo de amostra.")
+                type_id = type_name_to_id.get(sample_type_name)
+                if not type_id:
+                    st.error("Selecione um tipo de amostra válido.")
                 else:
                     payload = {
                         "project_id": proj_options[proj_label],
                         "assignee_id": people_options[resp_label],
-                        "sample_type": sample_type.strip(),
+                        "sample_type_id": type_id,
+                        "sample_type": sample_type_name,  # compat com coluna texto
                         "shipment_date": shipment.isoformat() if shipment else None,
                         "status": status_new,
                         "sla_days": int(sla),
@@ -503,7 +531,11 @@ edited = st.data_editor(
     num_rows="fixed",
     column_config={
         "Projeto":     st.column_config.TextColumn(disabled=True, width="small"),
-        "Tipo":        st.column_config.TextColumn(width="medium"),
+        "Tipo":        st.column_config.SelectboxColumn(
+            options=type_names_sorted,
+            width="medium",
+            help="Tipos cadastrados em lab_sample_types.",
+        ),
         "Responsável": st.column_config.SelectboxColumn(
             options=[""] + people_names_sorted,
             width="medium",
@@ -607,8 +639,17 @@ if save_clicked:
             errors.append(f"{sample_id}: Tipo de amostra é obrigatório.")
             continue
 
+        after_type_id = type_name_to_id.get(after_tipo)
+        if not after_type_id:
+            fail += 1
+            errors.append(
+                f"{sample_id}: Tipo '{after_tipo}' não cadastrado em lab_sample_types."
+            )
+            continue
+
         payload = {
-            "sample_type": after_tipo,
+            "sample_type_id": after_type_id,
+            "sample_type": after_tipo,  # compat com coluna texto
             "status": after_status,
             "shipment_date": after_entrega.isoformat() if after_entrega else None,
             "sla_days": int(after_sla),
