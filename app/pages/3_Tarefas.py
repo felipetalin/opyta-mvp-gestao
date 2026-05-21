@@ -1,25 +1,26 @@
 # app/pages/3_Tarefas.py
 
+
 import re
-from datetime import date
+from datetime import date, timedelta
+
 
 import pandas as pd
 import streamlit as st
 
+
 from services.auth import require_login
 from services.supabase_client import get_authed_client
+
 
 # Branding (não pode quebrar o app se faltar algo)
 try:
     from ui.brand import apply_brand, apply_app_chrome, page_header
 except Exception:
-
     def apply_brand():  # type: ignore
         return
-
     def apply_app_chrome():  # type: ignore
         return
-
     def page_header(title, subtitle, user_email=""):  # type: ignore
         st.title(title)
         if subtitle:
@@ -28,11 +29,53 @@ except Exception:
             st.caption(f"Logado como: {user_email}")
 
 
+
 TIPO_OPTIONS = ["CAMPO", "RELATORIO", "ADMINISTRATIVO"]
 DATE_CONFIDENCE_OPTIONS = ["PLANEJADO", "CONFIRMADO", "CANCELADO"]
 
 STATUS_DEFAULT = "PLANEJADA"
 PLACEHOLDER_PERSON_NAME = "Profissional"
+
+# Situação: badge automática
+SITUACAO_PRIORITY = {
+    "Atrasada": 1,
+    "Próxima": 2,
+    "Em andamento": 3,
+    "Planejada": 4,
+    "Concluída": 5,
+    "Cancelada": 6,
+    "Sem prazo": 7,
+}
+
+def situacao_for(row, today=None):
+    today = today or date.today()
+    status = (row.get("status") or "").upper()
+    date_conf = (row.get("date_confidence") or "").upper()
+    end = to_date(row.get("end_date"))
+    if date_conf == "CANCELADO" or status == "CANCELADA":
+        return "Cancelada"
+    if status == "CONCLUIDA":
+        return "Concluída"
+    if end is None:
+        return "Sem prazo"
+    if end < today:
+        return "Atrasada"
+    if (end - today).days <= 7:
+        return "Próxima"
+    if status in ("EM_ANDAMENTO", "EM ANDAMENTO"):
+        return "Em andamento"
+    return "Planejada"
+
+def days_delta(end, today=None):
+    today = today or date.today()
+    if end is None:
+        return "—"
+    d = (end - today).days
+    if d == 0:
+        return "Hoje"
+    if d > 0:
+        return f"+{d}d"
+    return f"{d}d (atraso)"
 
 
 # ==========================================================
@@ -184,6 +227,7 @@ def refresh_tasks_cache():
 
 
 # ==========================================================
+
 # Projeto
 # ==========================================================
 k = _cache_key()
@@ -194,6 +238,9 @@ if df_projects.empty:
     st.warning("Nenhum projeto encontrado. Crie um projeto antes.")
     st.stop()
 
+# Filtros operacionais
+st.divider()
+st.subheader("Filtros e visão geral")
 selected_label = st.selectbox("Projeto", df_projects["label"].tolist(), index=0)
 project_id = df_projects.loc[df_projects["label"] == selected_label, "id"].iloc[0]
 
@@ -207,6 +254,120 @@ if PLACEHOLDER_PERSON_NAME not in people_map:
 
 placeholder_id = people_map[PLACEHOLDER_PERSON_NAME]
 people_names = sorted(list(people_map.keys()))
+
+# Carrega tarefas
+df_tasks = load_tasks_for_project(k, project_id)
+if df_tasks.empty:
+    st.info("Sem tarefas nesse projeto.")
+    st.stop()
+
+# Garante colunas
+for col, default in [
+    ("assignee_names", PLACEHOLDER_PERSON_NAME),
+    ("assignee_id", None),
+    ("notes", ""),
+    ("tipo_atividade", ""),
+    ("status", STATUS_DEFAULT),
+    ("date_confidence", "PLANEJADO"),
+    ("start_date", None),
+    ("end_date", None),
+]:
+    if col not in df_tasks.columns:
+        df_tasks[col] = default
+
+# Filtros
+tipo_opts = [x for x in TIPO_OPTIONS if x in df_tasks["tipo_atividade"].unique()]
+sit_opts = ["Atrasada", "Próxima", "Em andamento", "Planejada", "Concluída", "Cancelada", "Sem prazo"]
+status_opts = sorted(df_tasks["status"].dropna().unique())
+lead_opts = sorted(set([_lead_name_row(aid, an) for aid, an in zip(df_tasks["assignee_id"], df_tasks["assignee_names"])]))
+
+c1, c2, c3, c4, c5 = st.columns([1.2,1.2,1.2,1.2,2.2])
+with c1:
+    f_tipo = st.multiselect("Tipo", tipo_opts, default=tipo_opts)
+with c2:
+    f_sit = st.multiselect("Situação", sit_opts, default=["Atrasada", "Próxima", "Em andamento", "Planejada"])
+with c3:
+    f_status = st.multiselect("Status", status_opts, default=status_opts)
+with c4:
+    f_lead = st.multiselect("Lead", lead_opts, default=lead_opts)
+with c5:
+    f_periodo = st.selectbox("Período (Fim)", ["Mês atual", "Próximos 15 dias", "Todos"], index=0)
+
+f_search = st.text_input("Busca (título/notas)", value="")
+
+# Aplica filtros
+today = date.today()
+df_tasks["__situacao"] = df_tasks.apply(lambda r: situacao_for(r, today), axis=1)
+df_tasks["__days"] = df_tasks["end_date"].apply(lambda x: days_delta(to_date(x), today))
+df_tasks["__lead"] = [_lead_name_row(aid, an) for aid, an in zip(df_tasks["assignee_id"], df_tasks["assignee_names"])]
+
+df_filt = df_tasks[
+    df_tasks["tipo_atividade"].isin(f_tipo)
+    & df_tasks["__situacao"].isin(f_sit)
+    & df_tasks["status"].isin(f_status)
+    & df_tasks["__lead"].isin(f_lead)
+]
+if f_periodo == "Mês atual":
+    first = today.replace(day=1)
+    last = (first + timedelta(days=32)).replace(day=1) - timedelta(days=1)
+    df_filt = df_filt[df_filt["end_date"].apply(lambda x: to_date(x) is not None and first <= to_date(x) <= last)]
+elif f_periodo == "Próximos 15 dias":
+    df_filt = df_filt[df_filt["end_date"].apply(lambda x: to_date(x) is not None and today <= to_date(x) <= today + timedelta(days=15))]
+# Busca textual
+if f_search.strip():
+    s = f_search.strip().lower()
+    df_filt = df_filt[df_filt["title"].str.lower().str.contains(s) | df_filt["notes"].str.lower().str.contains(s)]
+
+# Sort
+sort_opts = ["Situação (prioridade)", "Prazo (Fim)", "Tarefa (A→Z)", "Lead (A→Z)"]
+sort_sel = st.selectbox("Ordenar por", sort_opts, index=0)
+if sort_sel == "Situação (prioridade)":
+    df_filt = df_filt.sort_values(["__situacao", "end_date"], key=lambda x: x.map(SITUACAO_PRIORITY), ascending=True)
+elif sort_sel == "Prazo (Fim)":
+    df_filt = df_filt.sort_values("end_date", ascending=True)
+elif sort_sel == "Tarefa (A→Z)":
+    df_filt = df_filt.sort_values("title", ascending=True)
+elif sort_sel == "Lead (A→Z)":
+    df_filt = df_filt.sort_values("__lead", ascending=True)
+
+# Painel vencimentos
+tot = len(df_filt)
+tot_atrasadas = (df_filt["__situacao"] == "Atrasada").sum()
+tot_proximas = (df_filt["__situacao"] == "Próxima").sum()
+tot_andamento = (df_filt["__situacao"] == "Em andamento").sum()
+tot_planejadas = (df_filt["__situacao"] == "Planejada").sum()
+tot_concluidas = (df_filt["__situacao"] == "Concluída").sum()
+tot_canceladas = (df_filt["__situacao"] == "Cancelada").sum()
+
+st.markdown("""
+<div style='display:flex;gap:1.5em;'>
+  <div style='padding:0.5em 1em;background:#ffeaea;border-radius:8px;'>🔴 <b>Atrasadas:</b> {}</div>
+  <div style='padding:0.5em 1em;background:#fffbe6;border-radius:8px;'>⏰ <b>Próximas (≤7d):</b> {}</div>
+  <div style='padding:0.5em 1em;background:#e6f7ff;border-radius:8px;'>🟢 <b>Em andamento:</b> {}</div>
+  <div style='padding:0.5em 1em;background:#e6ffe6;border-radius:8px;'>📋 <b>Planejadas:</b> {}</div>
+  <div style='padding:0.5em 1em;background:#e6ffe6;border-radius:8px;'>✅ <b>Concluídas:</b> {}</div>
+  <div style='padding:0.5em 1em;background:#f0f0f0;border-radius:8px;'>⛔ <b>Canceladas:</b> {}</div>
+</div>
+""".format(tot_atrasadas, tot_proximas, tot_andamento, tot_planejadas, tot_concluidas, tot_canceladas), unsafe_allow_html=True)
+
+st.caption(f"Total filtrado: {tot}")
+
+# Export
+col_export1, col_export2 = st.columns([1,1])
+with col_export1:
+    st.download_button("Exportar CSV", df_filt.to_csv(index=False, sep=";", encoding="utf-8-sig"), file_name="tarefas.csv")
+with col_export2:
+    try:
+        import io
+        import xlsxwriter
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+            df_filt.to_excel(writer, index=False)
+        st.download_button("Exportar Excel", output.getvalue(), file_name="tarefas.xlsx")
+    except Exception:
+        pass
+
+st.divider()
 
 
 # ==========================================================
@@ -292,26 +453,6 @@ with st.container(border=True):
 
 
 # ==========================================================
-# Lista (INLINE) + Box de edição de responsáveis
-# ==========================================================
-st.divider()
-st.subheader("Lista de tarefas (edite direto aqui)")
-st.caption("✅ Edite na tabela e clique em **Salvar alterações**. Para excluir, use o bloco vermelho abaixo.")
-st.caption("👤 **Responsáveis:** no inline você edita apenas o **Lead** (dropdown). Co-responsáveis são editados no box abaixo.")
-
-df_tasks = load_tasks_for_project(k, project_id)
-if df_tasks.empty:
-    st.info("Sem tarefas nesse projeto.")
-    st.stop()
-
-# garante colunas
-for col, default in [
-    ("assignee_names", PLACEHOLDER_PERSON_NAME),
-    ("assignee_id", None),
-    ("notes", ""),
-]:
-    if col not in df_tasks.columns:
-        df_tasks[col] = default
 
 # função para achar lead-name com fallback
 def _lead_name_row(assignee_id, assignee_names_text: str) -> str:
@@ -325,23 +466,20 @@ def _lead_name_row(assignee_id, assignee_names_text: str) -> str:
         return parts[0]
     return PLACEHOLDER_PERSON_NAME
 
-
-ids = safe_text_list(df_tasks["task_id"])
-
+ids = safe_text_list(df_filt["task_id"])
 df_show = pd.DataFrame(
     {
-        "Excluir?": [False] * len(df_tasks),
-        "Tarefa": safe_text_list(df_tasks["title"]),
-        "Tipo": safe_text_list(df_tasks["tipo_atividade"]),
-        "Lead": [
-            _lead_name_row(aid, an)
-            for aid, an in zip(df_tasks["assignee_id"].tolist(), safe_text_list(df_tasks["assignee_names"], PLACEHOLDER_PERSON_NAME))
-        ],
-        "Responsável(is)": [x or PLACEHOLDER_PERSON_NAME for x in safe_text_list(df_tasks["assignee_names"], PLACEHOLDER_PERSON_NAME)],
-        "Início": [to_date(x) for x in df_tasks["start_date"].tolist()],
-        "Fim": [to_date(x) for x in df_tasks["end_date"].tolist()],
-        "Status da data": [x or "PLANEJADO" for x in safe_text_list(df_tasks["date_confidence"])],
-        "Obs": safe_text_list(df_tasks["notes"]),
+        "Excluir?": [False] * len(df_filt),
+        "Tarefa": safe_text_list(df_filt["title"]),
+        "Tipo": safe_text_list(df_filt["tipo_atividade"]),
+        "Lead": [_lead_name_row(aid, an) for aid, an in zip(df_filt["assignee_id"].tolist(), safe_text_list(df_filt["assignee_names"], PLACEHOLDER_PERSON_NAME))],
+        "Responsável(is)": [x or PLACEHOLDER_PERSON_NAME for x in safe_text_list(df_filt["assignee_names"], PLACEHOLDER_PERSON_NAME)],
+        "Início": [to_date(x) for x in df_filt["start_date"].tolist()],
+        "Fim": [to_date(x) for x in df_filt["end_date"].tolist()],
+        "Dias": df_filt["__days"].tolist(),
+        "Situação": df_filt["__situacao"].tolist(),
+        "Status da data": [x or "PLANEJADO" for x in safe_text_list(df_filt["date_confidence"])],
+        "Obs": safe_text_list(df_filt["notes"]),
     },
     index=ids,
 )
@@ -351,18 +489,17 @@ edited = st.data_editor(
     use_container_width=True,
     hide_index=True,
     num_rows="fixed",
+    key=f"tarefas_editor::{hash((tuple(f_tipo), tuple(f_sit), tuple(f_status), tuple(f_lead), f_periodo, f_search, sort_sel, tuple(ids)))}",
     column_config={
         "Excluir?": st.column_config.CheckboxColumn("Excluir?", width="small", help="Marque para excluir."),
         "Tarefa": st.column_config.TextColumn(width="large"),
         "Tipo": st.column_config.SelectboxColumn(options=TIPO_OPTIONS, width="medium"),
         "Lead": st.column_config.SelectboxColumn(options=people_names, width="medium", help="Responsável principal (Lead)"),
-        "Responsável(is)": st.column_config.TextColumn(
-            width="large",
-            disabled=True,
-            help="Exibição apenas. Para editar co-responsáveis use o box abaixo.",
-        ),
+        "Responsável(is)": st.column_config.TextColumn(width="large", disabled=True, help="Exibição apenas. Para editar co-responsáveis use o box abaixo."),
         "Início": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
         "Fim": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Dias": st.column_config.TextColumn(width="small", disabled=True),
+        "Situação": st.column_config.TextColumn(width="medium", disabled=True),
         "Status da data": st.column_config.SelectboxColumn(options=DATE_CONFIDENCE_OPTIONS, width="medium"),
         "Obs": st.column_config.TextColumn(width="large"),
     },
