@@ -492,8 +492,21 @@ if save_clicked:
         errors: list[str] = []
         for row in changes:
             try:
-                sb.table("task_delivery_tracking").upsert(row, on_conflict="task_id").execute()
-                ok += 1
+                resp = (
+                    sb.table("task_delivery_tracking")
+                    .upsert(row, on_conflict="task_id", returning="representation")
+                    .execute()
+                )
+                # PostgREST pode responder 200 com data vazia quando RLS/trigger
+                # bloqueia silenciosamente — tratamos como falha explícita.
+                if not getattr(resp, "data", None):
+                    fail += 1
+                    errors.append(
+                        f"{row['task_id']}: upsert não retornou linha "
+                        "(provável bloqueio por RLS/trigger no banco)."
+                    )
+                else:
+                    ok += 1
             except Exception as e:
                 fail += 1
                 errors.append(f"{row['task_id']}: {_api_error_message(e)}")
