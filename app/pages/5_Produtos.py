@@ -411,8 +411,16 @@ edited = st.data_editor(
         "Status":      st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
         "Revisão?":    st.column_config.CheckboxColumn(width="small"),
         "Enviado?":    st.column_config.CheckboxColumn(width="small", help="Marcar preenche Entrega com hoje se vazia"),
-        "Entrega":     st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
-        "Faturamento": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Entrega":     st.column_config.DateColumn(
+            format="DD/MM/YYYY", width="small",
+            help="Edite manualmente para corrigir a data real de entrega. "
+                 "Auto-fill só preenche se a célula estiver vazia.",
+        ),
+        "Faturamento": st.column_config.DateColumn(
+            format="DD/MM/YYYY", width="small",
+            help="Edite manualmente para corrigir a data real do faturamento. "
+                 "Auto-fill só preenche se a célula estiver vazia.",
+        ),
         "Prazo":       st.column_config.DateColumn(format="DD/MM/YYYY", disabled=True, width="small"),
         "Obs":         st.column_config.TextColumn(width="large"),
     },
@@ -420,9 +428,11 @@ edited = st.data_editor(
 )
 
 st.caption(
-    "💡 Auto-datação ao salvar: marcar **Enviado?** ou status **Entregue** "
-    "preenche **Entrega** com hoje se estiver vazia. Status **Faturado** "
-    "preenche **Faturamento** com hoje."
+    "💡 **Entrega** e **Faturamento** são editáveis: clique na célula e "
+    "ajuste a data real (ex.: produto enviado ontem mas marcado só hoje). "
+    "Auto-datação só preenche com hoje quando a célula está **vazia** — "
+    "marcar **Enviado?** ou status **Entregue** dispara a entrega; "
+    "status **Faturado** dispara o faturamento."
 )
 
 bc1, bc2, _ = st.columns([1, 1, 4])
