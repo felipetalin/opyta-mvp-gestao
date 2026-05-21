@@ -9,7 +9,7 @@ task_delivery_events. Nenhum cadastro novo de produto é feito aqui.
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -120,6 +120,30 @@ def safe_text_list(series: pd.Series, default: str = "") -> list[str]:
     return out
 
 
+# ----- Helpers de período (espelho do Gantt) -----
+def month_range(d: date) -> tuple[date, date]:
+    first = d.replace(day=1)
+    if first.month == 12:
+        nxt = first.replace(year=first.year + 1, month=1, day=1)
+    else:
+        nxt = first.replace(month=first.month + 1, day=1)
+    return first, nxt - timedelta(days=1)
+
+
+def shift_month_first(d: date, delta: int) -> date:
+    y, m = d.year, d.month + delta
+    while m > 12:
+        y += 1; m -= 12
+    while m < 1:
+        y -= 1; m += 12
+    return date(y, m, 1)
+
+
+def month_label(d: date) -> str:
+    meses = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"]
+    return f"{meses[d.month - 1]}/{d.year}"
+
+
 # ==========================================================
 # Loads
 # ==========================================================
@@ -171,7 +195,31 @@ projects_all = sorted({p for p in safe_text_list(df["project_code"]) if p})
 disc_all = sorted({d for d in safe_text_list(df["discipline"]) if d})
 ent_all = sorted({e for e in safe_text_list(df["enterprise"]) if e})
 
-fc1, fc2, fc3, fc4, fc5 = st.columns([1.4, 1.2, 1.4, 1.4, 1.0])
+# --- Atalhos de período (mesma lógica do Gantt) ---
+today = date.today()
+cur_first = shift_month_first(today, 0)
+next_first = shift_month_first(today, 1)
+prev_first = shift_month_first(today, -1)
+next2_first = shift_month_first(today, 2)
+
+cur_start, cur_end = month_range(cur_first)
+next_start, next_end = month_range(next_first)
+prev_start, _ = month_range(prev_first)
+_, next2_end = month_range(next2_first)
+
+period_presets: list[tuple[str, date | None, date | None]] = [
+    ("Tudo", None, None),
+    (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
+    (f"Próximo mês ({month_label(next_first)})", next_start, next_end),
+    (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
+    (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
+    (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
+    ("(manual)", None, None),
+]
+period_labels = [p[0] for p in period_presets]
+default_period_idx = 1  # Mês atual
+
+fc1, fc2, fc3, fc4 = st.columns([1.4, 1.2, 1.4, 1.4])
 with fc1:
     f_projects = st.multiselect("Projeto", projects_all, default=[])
 with fc2:
@@ -185,9 +233,51 @@ with fc4:
         default=[],
         format_func=lambda s: STATUS_LABEL.get(s, s),
     )
-with fc5:
-    only_pending = st.toggle("Pendentes", value=False, help="Oculta ENTREGUE e FATURADO")
 
+fc5, fc6, fc7, fc8 = st.columns([2.0, 1.2, 1.2, 1.2])
+with fc5:
+    sel_period = st.selectbox(
+        "Atalho (período pelo Prazo)",
+        period_labels,
+        index=default_period_idx,
+        help="Filtra produtos cuja data de Prazo cai dentro do período.",
+    )
+with fc6:
+    include_overdue = st.toggle(
+        "Incluir atrasados",
+        value=True,
+        help="Mostra também produtos com Prazo vencido (não entregues/faturados), mesmo fora do período.",
+    )
+with fc7:
+    include_undated = st.toggle(
+        "Incluir sem prazo",
+        value=True,
+        help="Mostra produtos sem data de Prazo cadastrada.",
+    )
+with fc8:
+    only_pending = st.toggle("Apenas pendentes", value=False, help="Oculta ENTREGUE e FATURADO")
+
+# Resolução do período
+chosen = next(p for p in period_presets if p[0] == sel_period)
+if chosen[0] == "(manual)":
+    period = st.date_input(
+        "Período manual (Prazo)",
+        value=(cur_start, cur_end),
+        format="DD/MM/YYYY",
+    )
+    if isinstance(period, tuple) and len(period) == 2:
+        p_start, p_end = period
+    else:
+        p_start, p_end = cur_start, cur_end
+elif chosen[0] == "Tudo":
+    p_start, p_end = None, None
+else:
+    p_start, p_end = chosen[1], chosen[2]
+    st.caption(
+        f"Período (Prazo): **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**"
+    )
+
+# --- Máscaras ---
 mask = pd.Series(True, index=df.index)
 if f_projects:
     mask &= df["project_code"].isin(f_projects)
@@ -200,20 +290,38 @@ if f_status:
 if only_pending:
     mask &= ~df["delivery_status"].isin(["ENTREGUE", "FATURADO"])
 
+# Filtro de período sobre end_date (Prazo) — com OR p/ atrasados e sem prazo
+end_dates = pd.to_datetime(df["end_date"], errors="coerce").dt.date
+if p_start is not None and p_end is not None:
+    in_window = end_dates.between(p_start, p_end)
+    extra = pd.Series(False, index=df.index)
+    if include_overdue:
+        overdue = (
+            end_dates.notna()
+            & (end_dates < today)
+            & ~df["delivery_status"].isin(["ENTREGUE", "FATURADO"])
+        )
+        extra = extra | overdue
+    if include_undated:
+        extra = extra | end_dates.isna()
+    mask &= in_window | extra
+else:
+    if not include_undated:
+        mask &= end_dates.notna()
+
 df_f = df.loc[mask].reset_index(drop=True)
 
 
 # ==========================================================
 # Métricas
 # ==========================================================
-today = date.today()
-end_dates = pd.to_datetime(df_f["end_date"], errors="coerce").dt.date
+end_dates_f = pd.to_datetime(df_f["end_date"], errors="coerce").dt.date
 
 n_andamento = int(df_f["delivery_status"].isin(["EM_ELABORACAO", "EM_REVISAO"]).sum())
 n_revisao = int(df_f["needs_revision"].fillna(False).astype(bool).sum())
 atrasado_mask = (
-    end_dates.notna()
-    & (end_dates < today)
+    end_dates_f.notna()
+    & (end_dates_f < today)
     & ~df_f["delivery_status"].isin(["ENTREGUE", "FATURADO"])
 )
 n_atrasado = int(atrasado_mask.sum())
