@@ -446,8 +446,10 @@ if save_clicked:
         before_sent = bool(before["Enviado?"])
         after_rev = bool(after["Revisão?"])
 
-        after_entrega = after["Entrega"] or None
-        after_fat = after["Faturamento"] or None
+        after_entrega = to_date(after["Entrega"])
+        after_fat = to_date(after["Faturamento"])
+        before_entrega = to_date(before["Entrega"])
+        before_fat = to_date(before["Faturamento"])
 
         # --- Auto-datação ---
         # Status virou ENTREGUE OU "Enviado?" foi marcado agora → entrega = hoje (se vazia)
@@ -464,8 +466,8 @@ if save_clicked:
             before_status != after_status
             or bool(before["Revisão?"]) != after_rev
             or before_sent != after_sent
-            or (before["Entrega"] or None) != after_entrega
-            or (before["Faturamento"] or None) != after_fat
+            or before_entrega != after_entrega
+            or before_fat != after_fat
             or norm_text(before["Obs"]) != norm_text(after["Obs"])
         )
         if not diff:
