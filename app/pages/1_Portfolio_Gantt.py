@@ -11,8 +11,17 @@ from services.auth import require_login
 from services.supabase_client import get_authed_client
 
 # Branding / Chrome
-from ui.brand import apply_brand, apply_app_chrome, page_header
-from ui.layout import filter_bar_start
+try:
+    from ui.brand import apply_brand, apply_app_chrome, page_header
+except Exception:
+    def apply_brand(): return  # type: ignore
+    def apply_app_chrome(): return  # type: ignore
+    def page_header(title, subtitle="", user_email=""):  # type: ignore
+        st.title(title)
+try:
+    from ui.layout import filter_bar_start
+except Exception:
+    def filter_bar_start(): return st.container()  # type: ignore
 
 
 # ==========================================================
@@ -24,6 +33,7 @@ apply_app_chrome()
 
 require_login()
 sb = get_authed_client()
+cache_key = str(st.session_state.get("access_token") or "no-token")
 
 page_header("Portfólio (Gantt)", "Filtros + cronograma", st.session_state.get("user_email", ""))
 
@@ -93,12 +103,13 @@ def split_people(assignee_names):
 # Load (view)
 # ==========================================================
 @st.cache_data(ttl=30)
-def fetch_portfolio_view():
+def fetch_portfolio_view(_cache_key: str):
     res = sb.table("v_portfolio_tasks").select("*").execute()
     return pd.DataFrame(res.data or [])
 
 
-df = fetch_portfolio_view()
+with st.spinner("Carregando portfólio..."):
+    df = fetch_portfolio_view(cache_key)
 
 if df.empty:
     st.warning("Nenhuma tarefa encontrada na view v_portfolio_tasks.")

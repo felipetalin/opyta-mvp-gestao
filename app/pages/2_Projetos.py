@@ -33,6 +33,7 @@ apply_app_chrome()
 
 require_login()
 sb = get_authed_client()
+cache_key = str(st.session_state.get("access_token") or "no-token")
 
 page_header("Projetos", "Cadastro e edição", st.session_state.get("user_email", ""))
 
@@ -83,7 +84,7 @@ def safe_text_list(series: pd.Series, default: str = "") -> list[str]:
 
 
 @st.cache_data(ttl=30)
-def fetch_projects():
+def fetch_projects(_cache_key: str):
     res = (
         sb.table("projects")
         .select("id,project_code,name,client,status,start_date,end_date_planned,notes,created_at")
@@ -158,7 +159,7 @@ st.divider()
 st.subheader("Lista de Projetos (edite direto aqui)")
 st.caption("✅ Edite na tabela e clique em **Salvar alterações**.")
 
-df = fetch_projects()
+df = fetch_projects(cache_key)
 if df.empty:
     st.info("Nenhum projeto cadastrado.")
     st.stop()

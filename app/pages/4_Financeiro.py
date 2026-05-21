@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from datetime import date
+import html
 import pandas as pd
 import streamlit as st
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
-from services.finance_guard import require_finance_access
+from services.finance_guard import can_finance_write, require_finance_access
 
 # Branding (não pode quebrar o app se faltar algo)
 try:
@@ -34,11 +35,15 @@ apply_app_chrome()
 
 require_login()
 sb = get_authed_client()
+cache_key = str(st.session_state.get("access_token") or "no-token")
 
 # 🔒 Acesso silencioso (para não constranger)
 user_email = require_finance_access(silent=True)
+can_write = can_finance_write(user_email)
 
 page_header("Financeiro", "Dashboard + lançamentos", user_email)
+if not can_write:
+    st.info("Acesso em modo leitura: você pode consultar, mas não criar/editar/excluir lançamentos.")
 
 TYPE_OPTIONS = ["RECEITA", "DESPESA", "TRANSFERENCIA"]
 STATUS_OPTIONS = ["PREVISTO", "REALIZADO", "CANCELADO"]
@@ -77,6 +82,10 @@ def _clean_str(x) -> str:
     return "" if s in ("None", "nan", "NaT") else s
 
 
+def _html(x) -> str:
+    return html.escape(_clean_str(x))
+
+
 def _brl(v: float) -> str:
     return f"R$ {v:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
@@ -109,13 +118,13 @@ def _pct(curr: float, prev: float) -> str:
 # Cache / fetchs
 # ==========================================================
 @st.cache_data(ttl=30)
-def fetch_projects():
+def fetch_projects(_cache_key: str):
     res = sb.table("projects").select("id,project_code,name").order("project_code", desc=False).execute()
     return pd.DataFrame(res.data or [])
 
 
 @st.cache_data(ttl=30)
-def fetch_categories():
+def fetch_categories(_cache_key: str):
     res = (
         sb.table("finance_categories")
         .select("id,name,type,active")
@@ -127,7 +136,7 @@ def fetch_categories():
 
 
 @st.cache_data(ttl=30)
-def fetch_counterparties():
+def fetch_counterparties(_cache_key: str):
     res = (
         sb.table("finance_counterparties")
         .select("id,name,type,active")
@@ -140,6 +149,7 @@ def fetch_counterparties():
 
 @st.cache_data(ttl=30)
 def fetch_transactions_view(
+    _cache_key: str,
     date_from: date,
     date_to: date,
     project_id: str | None,
@@ -196,9 +206,9 @@ def fetch_transactions_view(
         )
 
     # Enriquecimento (nomes)
-    cats = fetch_categories()
-    cps = fetch_counterparties()
-    projs = fetch_projects()
+    cats = fetch_categories(_cache_key)
+    cps = fetch_counterparties(_cache_key)
+    projs = fetch_projects(_cache_key)
 
     if not cats.empty:
         cats2 = cats[["id", "name"]].rename(columns={"id": "category_id", "name": "category_name"})
@@ -232,7 +242,7 @@ def insert_tx(payload: dict):
 
 
 @st.cache_data(ttl=30)
-def fetch_monthly_summary():
+def fetch_monthly_summary(_cache_key: str):
     res = (
         sb.from_("v_finance_monthly_summary")
         .select("month,receita,despesa,saldo")
@@ -243,7 +253,7 @@ def fetch_monthly_summary():
 
 
 @st.cache_data(ttl=30)
-def fetch_tx_min(date_from: date, date_to: date):
+def fetch_tx_min(_cache_key: str, date_from: date, date_to: date):
     res = (
         sb.table("finance_transactions")
         .select("date,type,status,amount")
@@ -255,7 +265,7 @@ def fetch_tx_min(date_from: date, date_to: date):
 
 
 @st.cache_data(ttl=30)
-def fetch_receivables(limit: int = 10):
+def fetch_receivables(_cache_key: str, limit: int = 10):
     res = (
         sb.from_("v_finance_receivables")
         .select("date,description,amount,counterparty_name,project_code,status")
@@ -267,7 +277,7 @@ def fetch_receivables(limit: int = 10):
 
 
 @st.cache_data(ttl=30)
-def fetch_payables(limit: int = 10):
+def fetch_payables(_cache_key: str, limit: int = 10):
     res = (
         sb.from_("v_finance_payables")
         .select("date,description,amount,counterparty_name,project_code,status")
@@ -338,9 +348,10 @@ st.markdown(
 # ==========================================================
 # DROPDOWNS (para filtros + insert + editor)
 # ==========================================================
-projects_df = fetch_projects()
-categories_df = fetch_categories()
-cp_df = fetch_counterparties()
+with st.spinner("Carregando dados de referência..."):
+    projects_df = fetch_projects(cache_key)
+    categories_df = fetch_categories(cache_key)
+    cp_df = fetch_counterparties(cache_key)
 
 proj_options = ["(Todos)"]
 proj_map: dict[str, str | None] = {"(Todos)": None}
@@ -415,7 +426,7 @@ st.divider()
 st.subheader("Dashboard")
 
 try:
-    ms = fetch_monthly_summary()
+    ms = fetch_monthly_summary(cache_key)
 except Exception as e:
     st.error("Erro ao carregar resumo mensal:")
     st.code(_api_error_message(e))
@@ -431,7 +442,7 @@ sel_month_str = st.selectbox("Mês (competência)", month_options, index=0, key=
 sel_month = pd.to_datetime(sel_month_str).date()
 
 m_from, m_to = month_range(sel_month)
-txm = fetch_tx_min(m_from, m_to)
+txm = fetch_tx_min(cache_key, m_from, m_to)
 
 def _calc_month(tx: pd.DataFrame):
     r_real = d_real = r_prev = d_prev = 0.0
@@ -450,7 +461,7 @@ curr = _calc_month(txm)
 
 pm = _prev_month(sel_month)
 pm_from, pm_to = month_range(pm)
-txm_prev = fetch_tx_min(pm_from, pm_to)
+txm_prev = fetch_tx_min(cache_key, pm_from, pm_to)
 prev = _calc_month(txm_prev)
 
 saldo_delta = _pct(curr["saldo"], prev["saldo"])
@@ -511,6 +522,7 @@ next_7 = (pd.to_datetime(today_dt) + pd.Timedelta(days=7)).date()
 
 try:
     df_alert = fetch_transactions_view(
+        cache_key,
         date_from=today_dt,
         date_to=next_7,
         project_id=None,
@@ -595,7 +607,7 @@ start_m = _add_months(end_m, -5)
 range_from = start_m
 range_to = month_range(end_m)[1]
 
-df_range = fetch_tx_min(range_from, range_to)
+df_range = fetch_tx_min(cache_key, range_from, range_to)
 
 if df_range.empty:
     st.caption("Sem dados no intervalo para montar o gráfico.")
@@ -653,6 +665,7 @@ st.subheader("Despesas por Categoria")
 
 try:
     df_month_full = fetch_transactions_view(
+        cache_key,
         date_from=m_from,
         date_to=m_to,
         project_id=None,
@@ -720,12 +733,12 @@ def _render_list_panel(df_in: pd.DataFrame, empty_text: str):
     for _, row in dfp.iterrows():
         d = row.get("date")
         d_txt = d.strftime("%d/%m") if isinstance(d, date) else ""
-        proj = row.get("project_code") or ""
-        cpty = row.get("counterparty_name") or ""
-        desc = row.get("description") or ""
+        proj = _html(row.get("project_code"))
+        cpty = _html(row.get("counterparty_name"))
+        desc = _html(row.get("description"))
         amt = _brl(float(row.get("amount") or 0.0))
         topline = " • ".join([x for x in [proj, cpty] if x])
-        subline = " • ".join([x for x in [d_txt, (row.get("status") or "").title()] if x])
+        subline = " • ".join([x for x in [_html(d_txt), _html((row.get("status") or "").title())] if x])
 
         html += f"""
         <div class="op-row">
@@ -743,7 +756,7 @@ def _render_list_panel(df_in: pd.DataFrame, empty_text: str):
 with r1:
     st.subheader("Contas a Receber (previsto)")
     try:
-        df_r = fetch_receivables(limit=10)
+        df_r = fetch_receivables(cache_key, limit=10)
     except Exception as e:
         st.error("Erro ao carregar contas a receber:")
         st.code(_api_error_message(e))
@@ -753,7 +766,7 @@ with r1:
 with r2:
     st.subheader("Contas a Pagar (previsto)")
     try:
-        df_p = fetch_payables(limit=10)
+        df_p = fetch_payables(cache_key, limit=10)
     except Exception as e:
         st.error("Erro ao carregar contas a pagar:")
         st.code(_api_error_message(e))
@@ -767,7 +780,10 @@ st.divider()
 # NOVO LANÇAMENTO (INSERT)
 # ==========================================================
 st.subheader("Novo lançamento")
-st.caption("✅ Criar lançamentos. (Você pode editar/excluir na tabela abaixo.)")
+if can_write:
+    st.caption("✅ Criar lançamentos. (Você pode editar/excluir na tabela abaixo.)")
+else:
+    st.caption("🔒 Somente leitura para seu usuário.")
 
 with st.container(border=True):
     c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.2, 1.2])
@@ -798,7 +814,7 @@ with st.container(border=True):
 
     new_notes = st.text_area("Observações (opcional)", value="", height=80, key="new_notes")
 
-    if st.button("Salvar lançamento", type="primary"):
+    if st.button("Salvar lançamento", type="primary", disabled=not can_write):
         if norm(new_desc) == "":
             st.error("Descrição é obrigatória.")
         elif float(new_amount) <= 0:
@@ -846,6 +862,7 @@ def _reset_editor_state():
 
 try:
     df = fetch_transactions_view(
+        cache_key,
         date_from=date_from,
         date_to=date_to,
         project_id=f_project_id,
@@ -930,6 +947,7 @@ edited = st.data_editor(
     df_edit,
     key="finance_editor",
     use_container_width=True,
+    disabled=not can_write,
     hide_index=True,
     num_rows="fixed",
     column_order=[
@@ -960,7 +978,7 @@ edited = st.data_editor(
 )
 
 c1, c2 = st.columns([1, 1])
-save_btn = c1.button("Salvar alterações", type="primary")
+save_btn = c1.button("Salvar alterações", type="primary", disabled=not can_write)
 reload_btn = c2.button("Recarregar lançamentos")
 
 if reload_btn:
@@ -976,6 +994,10 @@ if delete_ids:
     confirm_delete = st.checkbox(f"Confirmar exclusão de {len(delete_ids)} lançamento(s)", value=False)
 
 if save_btn:
+    if not can_write:
+        st.warning("Seu perfil não possui permissão de escrita no Financeiro.")
+        st.stop()
+
     before = df_edit.copy()
     after = edited.copy()
 

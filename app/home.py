@@ -1,6 +1,5 @@
 import streamlit as st
-from ui.brand import apply_brand
-from ui.layout import apply_app_chrome, page_header
+from ui.brand import apply_brand, apply_app_chrome, page_header
 
 from services.auth import require_login, logout
 
@@ -22,12 +21,6 @@ page_header("Opyta - Gestão de Projetos (MVP)", "Ambiente de testes (MVP)", use
 # if st.button("Sair"):
 #     logout()
 
-
-col1, _ = st.columns([1, 6])
-with col1:
-    if st.button("Sair"):
-        logout()
-        st.rerun()
 
 st.write("Use o menu à esquerda para navegar: Portfólio Gantt, Projetos e Tarefas.")
 

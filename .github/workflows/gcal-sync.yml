@@ -30,9 +30,21 @@ jobs:
           pip install -r requirements-sync.txt
 
       - name: Write Google Service Account JSON
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
           mkdir -p secrets_gcal
-          echo '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > secrets_gcal/service-account-gcal.json
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          content = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+          output = Path("secrets_gcal/service-account-gcal.json")
+          output.write_text(content, encoding="utf-8")
+          json.loads(output.read_text(encoding="utf-8"))
+          print("Google service account JSON written and validated.")
+          PY
 
       - name: Run Sync
         env:

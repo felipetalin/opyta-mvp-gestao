@@ -187,7 +187,9 @@ def refresh_tasks_cache():
 # Projeto
 # ==========================================================
 k = _cache_key()
-df_projects = load_projects(k)
+with st.spinner("Carregando dados..."):
+    df_projects = load_projects(k)
+    df_people, people_map, id_to_name = load_people(k)
 if df_projects.empty:
     st.warning("Nenhum projeto encontrado. Crie um projeto antes.")
     st.stop()
@@ -195,7 +197,6 @@ if df_projects.empty:
 selected_label = st.selectbox("Projeto", df_projects["label"].tolist(), index=0)
 project_id = df_projects.loc[df_projects["label"] == selected_label, "id"].iloc[0]
 
-df_people, people_map, id_to_name = load_people(k)
 if df_people.empty:
     st.warning("Tabela people está vazia.")
     st.stop()

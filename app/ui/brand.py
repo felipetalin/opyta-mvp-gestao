@@ -1,4 +1,6 @@
 # app/ui/brand.py
+import html
+
 import streamlit as st
 from pathlib import Path
 
@@ -104,12 +106,23 @@ def apply_app_chrome():
             st.image(str(LOGO_PATH), use_container_width=True)
         else:
             st.caption("Logo não encontrada em app/assets/logo.png")
-
+        st.divider()
+        user = st.session_state.get("user_email", "")
+        if user:
+            st.caption(f"Logado como: **{html.escape(user)}**")
+        if st.button("Sair", key="_sidebar_logout", use_container_width=True):
+            from services.auth import logout  # import local evita circular
+            logout()
+            st.rerun()
 
 def page_header(title: str, subtitle: str = "", user_email: str = ""):
     """
     Cabeçalho padrão no topo da página (card).
     """
+    safe_title = html.escape(title or "")
+    safe_subtitle = html.escape(subtitle or "")
+    safe_user_email = html.escape(user_email or "")
+
     st.markdown(
         f"""
         <div style="
@@ -120,10 +133,10 @@ def page_header(title: str, subtitle: str = "", user_email: str = ""):
           margin-bottom: 14px;">
           <div style="display:flex; justify-content:space-between; align-items:flex-start;">
             <div>
-              <div style="font-size: 18px; font-weight: 700; color: #1f2a17;">{title}</div>
-              <div style="font-size: 13px; color: rgba(31,42,23,0.75);">{subtitle}</div>
+              <div style="font-size: 18px; font-weight: 700; color: #1f2a17;">{safe_title}</div>
+              <div style="font-size: 13px; color: rgba(31,42,23,0.75);">{safe_subtitle}</div>
             </div>
-            <div style="font-size: 12px; color: rgba(31,42,23,0.65);">{user_email}</div>
+            <div style="font-size: 12px; color: rgba(31,42,23,0.65);">{safe_user_email}</div>
           </div>
         </div>
         """,
