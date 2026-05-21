@@ -602,9 +602,28 @@ name_to_id = {row["name"]: row["id"] for _, row in df_people.iterrows()} if not 
 ids = safe_text_list(df_f["sample_id"])
 status_labels = [STATUS_LABEL.get(s, s) for s in safe_text_list(df_f["status"], "PENDENTE")]
 
+# Situação automatica (derivada de status + previsão)
+def _situacao(status: str | None, exp: date | None) -> str:
+    if status in ("LAUDO_RECEBIDO", "CONCLUIDO"):
+        return "🟢 Concluído"
+    if exp is not None and exp < today:
+        return "🔴 Atraso"
+    if status == "PENDENTE":
+        return "🟡 Pendente"
+    return "🔵 Em análise"
+
+situacao_col = [
+    _situacao(s, to_date(e))
+    for s, e in zip(
+        safe_text_list(df_f["status"], "PENDENTE"),
+        df_f["expected_release_date"].tolist(),
+    )
+]
+
 df_show = pd.DataFrame(
     {
         "Projeto":      safe_text_list(df_f["project_code"]),
+        "Situação":     situacao_col,
         "Tipos":        [", ".join(lst) for lst in df_f["sample_types_list"].tolist()],
         "Qtd":          df_f["sample_count"].fillna(0).astype(int).tolist(),
         "Laboratório":  safe_text_list(df_f["lab_name"]),
@@ -628,6 +647,13 @@ edited = st.data_editor(
     num_rows="fixed",
     column_config={
         "Projeto":      st.column_config.TextColumn(disabled=True, width="small"),
+        "Situação":     st.column_config.TextColumn(
+            disabled=True, width="small",
+            help="Calculada automaticamente: 🔴 Atraso (previsão vencida), "
+                 "🟡 Pendente (não entregue ao lab), "
+                 "🔵 Em análise (entregue, no prazo), "
+                 "🟢 Concluído (laudo recebido).",
+        ),
         "Tipos":        st.column_config.TextColumn(
             disabled=True, width="medium",
             help="Para alterar os tipos, use **Editar tipos** abaixo da tabela.",
