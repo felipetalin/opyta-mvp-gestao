@@ -312,7 +312,7 @@ period_presets: list[tuple[str, date | None, date | None]] = [
     ("Tudo", None, None),
 ]
 period_labels = [p[0] for p in period_presets]
-default_period_idx = 3  # 3 meses por padrão
+default_period_idx = 0  # Mês atual por padrão
 
 fc1, fc2, fc3 = st.columns([1.6, 1.6, 1.2])
 with fc1:
@@ -545,6 +545,17 @@ df_show = pd.DataFrame(
 
 status_label_options = [STATUS_LABEL[s] for s in DELIVERY_STATUS_OPTIONS]
 
+# Assinatura dos filtros — força reset do data_editor quando filtros mudam.
+# Sem isso, o editor cacheia as edições por índice e mostra dados defasados.
+_editor_signature = hash(
+    (
+        tuple(f_projects), tuple(f_status), tuple(f_sit),
+        only_pending, include_overdue, include_undated,
+        sel_period, sort_label, search.strip(),
+        tuple(ids),
+    )
+)
+
 edited = st.data_editor(
     df_show,
     use_container_width=True,
@@ -576,7 +587,7 @@ edited = st.data_editor(
         ),
         "Obs":         st.column_config.TextColumn(width="large"),
     },
-    key="deliverables_editor",
+    key=f"deliverables_editor::{_editor_signature}",
 )
 
 st.caption(
