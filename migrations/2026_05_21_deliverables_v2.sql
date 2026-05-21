@@ -2,10 +2,13 @@
 -- Produtos / Entregas — v2: inclui responsável (assignee) na view
 -- Reaproveita v_portfolio_tasks que já agrega assignee_names a partir
 -- de task_assignees + people.
--- Idempotente.
+-- Idempotente. Drop+create porque a ordem das colunas mudou
+-- (create or replace view não permite reordenar/inserir colunas).
 -- =====================================================================
 
-create or replace view public.v_deliverables as
+drop view if exists public.v_deliverables;
+
+create view public.v_deliverables as
 select
   vpt.task_id                                   as task_id,
   vpt.project_id,
