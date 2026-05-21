@@ -337,8 +337,8 @@ with fc4:
     )
 with fc5:
     include_overdue = st.toggle(
-        "Incluir atrasados", value=True,
-        help="Mostra atrasados mesmo fora do período.",
+        "Incluir atrasados", value=False,
+        help="Mostra atrasados mesmo fora do período (default desligado para não poluir o mês atual).",
     )
 with fc6:
     include_undated = st.toggle("Incluir sem prazo", value=False)
