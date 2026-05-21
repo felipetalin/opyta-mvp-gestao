@@ -331,6 +331,49 @@ st.divider()
 st.subheader("Produtos")
 st.caption("Edite os campos de acompanhamento e clique em **Salvar alterações**.")
 
+# --- Busca livre + ordenação dentro do conjunto já filtrado ---
+SORT_OPTIONS = {
+    "Prazo (mais próximo primeiro)": ("end_date", True),
+    "Prazo (mais distante primeiro)": ("end_date", False),
+    "Projeto (A→Z)":                  ("project_code", True),
+    "Produto (A→Z)":                  ("product_name", True),
+    "Status":                         ("delivery_status", True),
+    "Atualizado recentemente":        ("tracking_updated_at", False),
+}
+
+tc1, tc2 = st.columns([2.5, 1.5])
+with tc1:
+    search = st.text_input(
+        "Buscar (Projeto · Produto · Responsável · Obs)",
+        value="",
+        placeholder="Ex.: relatório semestral, fulano, ASSCAF...",
+    )
+with tc2:
+    sort_label = st.selectbox("Ordenar por", list(SORT_OPTIONS.keys()), index=0)
+
+# Aplica busca livre
+if search.strip():
+    q = search.strip().lower()
+    haystack = (
+        df_f["project_code"].fillna("").astype(str).str.lower()
+        + " | "
+        + df_f["product_name"].fillna("").astype(str).str.lower()
+        + " | "
+        + (df_f["assignee_names"].fillna("").astype(str).str.lower() if "assignee_names" in df_f.columns else "")
+        + " | "
+        + df_f["tracking_notes"].fillna("").astype(str).str.lower()
+    )
+    df_f = df_f.loc[haystack.str.contains(q, na=False, regex=False)].reset_index(drop=True)
+
+# Aplica ordenação
+sort_col, sort_asc = SORT_OPTIONS[sort_label]
+if sort_col in df_f.columns and not df_f.empty:
+    df_f = df_f.sort_values(by=sort_col, ascending=sort_asc, na_position="last").reset_index(drop=True)
+
+if df_f.empty:
+    st.info("Nenhum produto corresponde aos filtros/busca atuais.")
+    st.stop()
+
 ids = safe_text_list(df_f["task_id"])
 
 status_labels = [STATUS_LABEL.get(s, s) for s in safe_text_list(df_f["delivery_status"], "NAO_INICIADO")]
