@@ -300,6 +300,11 @@ with st.expander("➕ Nova entrega de amostras", expanded=False):
                     value=date.today(),
                     format="DD/MM/YYYY",
                 )
+                sample_count_new = st.number_input(
+                    "Quantidade de amostras",
+                    min_value=0, max_value=10000, value=0, step=1,
+                    help="Número total de amostras nesta entrega (somando todos os tipos).",
+                )
             with f2:
                 resp_label = st.selectbox("Responsável", list(people_options.keys()))
                 sla = st.number_input(
@@ -331,6 +336,7 @@ with st.expander("➕ Nova entrega de amostras", expanded=False):
                         "assignee_id": people_options[resp_label],
                         "lab_id": lab_options[lab_label],
                         "sample_types": sel_types,
+                        "sample_count": int(sample_count_new) if sample_count_new else None,
                         "shipment_date": shipment.isoformat() if shipment else None,
                         "status": status_new,
                         "sla_days": int(sla),
@@ -362,6 +368,17 @@ with st.spinner("Carregando amostras..."):
 if df.empty:
     st.info("Nenhuma entrega cadastrada ainda. Use **Nova entrega de amostras** acima.")
     st.stop()
+
+# Fallbacks defensivos caso a view ainda não tenha as colunas das migrações v3/v4
+for col, default in [
+    ("sample_types", None),
+    ("lab_name", None),
+    ("lab_id", None),
+    ("sample_count", None),
+    ("sample_types_label", None),
+]:
+    if col not in df.columns:
+        df[col] = default
 
 df["sample_types_list"] = df["sample_types"].apply(to_list)
 
@@ -418,8 +435,9 @@ with fc4:
     sel_period = st.selectbox(
         "Atalho (período pela Previsão)",
         period_labels,
-        index=0,
-        help="Filtra amostras cuja previsão de liberação cai no período.",
+        index=3,
+        help="Filtra amostras cuja previsão de liberação cai no período. "
+             "Padrão = 3 meses para acomodar SLAs típicos de 30–60 dias.",
     )
 with fc5:
     include_overdue = st.toggle(
@@ -566,7 +584,12 @@ if sort_col in df_f.columns and not df_f.empty:
     df_f = df_f.sort_values(by=sort_col, ascending=sort_asc, na_position="last").reset_index(drop=True)
 
 if df_f.empty:
-    st.info("Nenhuma amostra corresponde aos filtros/busca atuais.")
+    st.info(
+        f"Nenhuma amostra corresponde aos filtros/busca atuais. "
+        f"Existem **{len(df)}** entrega(s) cadastrada(s) no total — "
+        "tente o atalho **Tudo**, ampliar o período ou ativar "
+        "*Incluir sem previsão* / *Incluir atrasadas*."
+    )
     st.stop()
 
 
@@ -583,6 +606,7 @@ df_show = pd.DataFrame(
     {
         "Projeto":      safe_text_list(df_f["project_code"]),
         "Tipos":        [", ".join(lst) for lst in df_f["sample_types_list"].tolist()],
+        "Qtd":          df_f["sample_count"].fillna(0).astype(int).tolist(),
         "Laboratório":  safe_text_list(df_f["lab_name"]),
         "Responsável":  safe_text_list(df_f["assignee_name"]),
         "Status":       status_labels,
@@ -607,6 +631,10 @@ edited = st.data_editor(
         "Tipos":        st.column_config.TextColumn(
             disabled=True, width="medium",
             help="Para alterar os tipos, use **Editar tipos** abaixo da tabela.",
+        ),
+        "Qtd":          st.column_config.NumberColumn(
+            min_value=0, max_value=10000, step=1, width="small",
+            help="Quantidade total de amostras nesta entrega.",
         ),
         "Laboratório":  st.column_config.SelectboxColumn(
             options=[""] + lab_names_sorted, width="medium",
@@ -680,6 +708,15 @@ if save_clicked:
         except Exception:
             after_sla = before_sla
 
+        try:
+            before_qtd = int(before["Qtd"]) if before["Qtd"] is not None else 0
+        except Exception:
+            before_qtd = 0
+        try:
+            after_qtd = int(after["Qtd"])
+        except Exception:
+            after_qtd = before_qtd
+
         before_resp = norm_text(before["Responsável"])
         after_resp = norm_text(after["Responsável"])
         before_lab = norm_text(before["Laboratório"])
@@ -699,6 +736,7 @@ if save_clicked:
             or before_entrega != after_entrega
             or before_sla != after_sla
             or before_prev != after_prev
+            or before_qtd != after_qtd
             or before_resp != after_resp
             or before_lab != after_lab
             or before_obs != after_obs
@@ -710,6 +748,7 @@ if save_clicked:
             "status": after_status,
             "shipment_date": after_entrega.isoformat() if after_entrega else None,
             "sla_days": int(after_sla),
+            "sample_count": int(after_qtd) if after_qtd else None,
             "expected_release_date": after_prev.isoformat() if after_prev else None,
             "notes": after_obs,
             "assignee_id": name_to_id.get(after_resp) if after_resp else None,
