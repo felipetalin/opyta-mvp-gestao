@@ -3,9 +3,10 @@
 Controle de amostras enviadas ao laboratório e previsão de liberação dos laudos.
 
 Tabela própria (lab_samples) — não reaproveita tasks. Cada linha = uma
-entrega de amostras vinculada a um projeto.
+entrega operacional, que pode conter MÚLTIPLOS tipos de amostras enviados
+em conjunto ao mesmo laboratório.
 
-Segue o mesmo padrão visual e operacional da aba Produtos.
+Estrutura espelha a aba Produtos.
 """
 
 from __future__ import annotations
@@ -116,6 +117,22 @@ def safe_text_list(series: pd.Series, default: str = "") -> list[str]:
     return out
 
 
+def to_list(x) -> list[str]:
+    """Normaliza valor vindo da view para list[str] (Postgres text[] ou string)."""
+    if x is None:
+        return []
+    if isinstance(x, list):
+        return [str(i) for i in x if i is not None and str(i).strip() != ""]
+    if isinstance(x, float) and pd.isna(x):
+        return []
+    s = str(x).strip()
+    if not s or s in ("None", "nan", "NaT"):
+        return []
+    if s.startswith("{") and s.endswith("}"):
+        s = s[1:-1]
+    return [p.strip().strip('"') for p in s.split(",") if p.strip()]
+
+
 def month_range(d: date) -> tuple[date, date]:
     first = d.replace(day=1)
     if first.month == 12:
@@ -192,31 +209,71 @@ def load_sample_types(_k: str) -> pd.DataFrame:
     return pd.DataFrame(res.data or [])
 
 
+@st.cache_data(ttl=300)
+def load_labs(_k: str) -> pd.DataFrame:
+    res = (
+        sb.table("labs")
+        .select("id, name, active, sort_order")
+        .eq("active", True)
+        .order("sort_order")
+        .order("name")
+        .execute()
+    )
+    return pd.DataFrame(res.data or [])
+
+
 def refresh():
     load_samples.clear()
     load_sample_types.clear()
+    load_labs.clear()
 
 
-# ==========================================================
-# Formulário — Nova entrega
-# ==========================================================
 df_projects = load_projects(cache_key)
 df_people = load_people(cache_key)
 df_types = load_sample_types(cache_key)
+df_labs = load_labs(cache_key)
 
-# Mapas auxiliares de tipos
-type_name_to_id: dict[str, str] = (
-    {str(r["name"]): r["id"] for _, r in df_types.iterrows()} if not df_types.empty else {}
-)
-type_names_sorted = list(type_name_to_id.keys())
+type_names_sorted = [str(r["name"]) for _, r in df_types.iterrows()] if not df_types.empty else []
+lab_name_to_id = {str(r["name"]): r["id"] for _, r in df_labs.iterrows()} if not df_labs.empty else {}
+lab_names_sorted = list(lab_name_to_id.keys())
 
+
+# ==========================================================
+# Cadastro rápido de laboratório
+# ==========================================================
+with st.expander("🧪 Cadastrar novo laboratório", expanded=False):
+    with st.form("new_lab", clear_on_submit=True):
+        new_lab_name = st.text_input("Nome do laboratório *", placeholder="Ex.: Biofile, Acquaplant...")
+        c1, _ = st.columns([1, 5])
+        submit_lab = c1.form_submit_button("Adicionar", type="primary")
+        if submit_lab:
+            nm = (new_lab_name or "").strip()
+            if not nm:
+                st.error("Informe o nome.")
+            elif nm in lab_name_to_id:
+                st.warning("Já existe um laboratório com esse nome.")
+            else:
+                try:
+                    sb.table("labs").insert(
+                        {"name": nm}, returning="representation"
+                    ).execute()
+                    st.success(f"Laboratório '{nm}' cadastrado.")
+                    refresh()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Falha: {_api_error_message(e)}")
+
+
+# ==========================================================
+# Nova entrega
+# ==========================================================
 with st.expander("➕ Nova entrega de amostras", expanded=False):
     if df_projects.empty:
         st.warning("Nenhum projeto cadastrado. Cadastre projetos antes.")
     elif not type_names_sorted:
         st.warning(
-            "Nenhum tipo de amostra cadastrado. Rode a migração "
-            "`2026_05_21_lab_samples_v2.sql` no Supabase."
+            "Nenhum tipo de amostra cadastrado. Rode `2026_05_21_lab_samples_v2.sql` "
+            "(e v3) no Supabase."
         )
     else:
         proj_options = {
@@ -226,27 +283,33 @@ with st.expander("➕ Nova entrega de amostras", expanded=False):
         people_options = {"(sem responsável)": None}
         for _, row in df_people.iterrows():
             people_options[str(row["name"])] = row["id"]
+        lab_options = {"(sem laboratório)": None, **lab_name_to_id}
 
         with st.form("new_lab_sample", clear_on_submit=True):
             f1, f2 = st.columns(2)
             with f1:
                 proj_label = st.selectbox("Projeto *", list(proj_options.keys()))
-                sample_type_name = st.selectbox("Tipo de amostra *", type_names_sorted)
+                sel_types = st.multiselect(
+                    "Tipos de amostra *",
+                    type_names_sorted,
+                    help="Selecione um ou mais tipos enviados nesta entrega.",
+                )
+                lab_label = st.selectbox("Laboratório", list(lab_options.keys()))
                 shipment = st.date_input(
                     "Data de entrega das amostras",
                     value=date.today(),
                     format="DD/MM/YYYY",
                 )
+            with f2:
+                resp_label = st.selectbox("Responsável", list(people_options.keys()))
                 sla = st.number_input(
                     "Prazo para liberação (dias)",
                     min_value=0, max_value=365, value=DEFAULT_SLA_DAYS, step=1,
                 )
-            with f2:
-                resp_label = st.selectbox("Responsável", list(people_options.keys()))
                 status_new = st.selectbox(
                     "Status",
                     LAB_STATUS_OPTIONS,
-                    index=1,  # ENTREGUE_LAB por padrão
+                    index=1,
                     format_func=lambda s: STATUS_LABEL.get(s, s),
                 )
                 expected_default = calc_expected(shipment, sla)
@@ -254,21 +317,20 @@ with st.expander("➕ Nova entrega de amostras", expanded=False):
                     "Previsão de liberação dos laudos",
                     value=expected_default,
                     format="DD/MM/YYYY",
-                    help="Calculada automaticamente (Entrega + Prazo), mas editável.",
+                    help="Calculada (Entrega + Prazo), mas editável.",
                 )
                 notes_new = st.text_area("Observações", value="", height=80)
 
             submitted = st.form_submit_button("Salvar entrega", type="primary")
             if submitted:
-                type_id = type_name_to_id.get(sample_type_name)
-                if not type_id:
-                    st.error("Selecione um tipo de amostra válido.")
+                if not sel_types:
+                    st.error("Selecione ao menos um tipo de amostra.")
                 else:
                     payload = {
                         "project_id": proj_options[proj_label],
                         "assignee_id": people_options[resp_label],
-                        "sample_type_id": type_id,
-                        "sample_type": sample_type_name,  # compat com coluna texto
+                        "lab_id": lab_options[lab_label],
+                        "sample_types": sel_types,
                         "shipment_date": shipment.isoformat() if shipment else None,
                         "status": status_new,
                         "sla_days": int(sla),
@@ -292,7 +354,7 @@ with st.expander("➕ Nova entrega de amostras", expanded=False):
 
 
 # ==========================================================
-# Tabela principal
+# Carrega tabela principal
 # ==========================================================
 with st.spinner("Carregando amostras..."):
     df = load_samples(cache_key)
@@ -301,13 +363,15 @@ if df.empty:
     st.info("Nenhuma entrega cadastrada ainda. Use **Nova entrega de amostras** acima.")
     st.stop()
 
+df["sample_types_list"] = df["sample_types"].apply(to_list)
+
 
 # ==========================================================
-# Filtros
+# Filtros (mesmo padrão da Produtos)
 # ==========================================================
 projects_all = sorted({p for p in safe_text_list(df["project_code"]) if p})
+labs_all = sorted({p for p in safe_text_list(df["lab_name"]) if p})
 people_all = sorted({p for p in safe_text_list(df["assignee_name"]) if p})
-types_all = sorted({t for t in safe_text_list(df["sample_type"]) if t})
 
 today = date.today()
 cur_first = shift_month_first(today, 0)
@@ -331,51 +395,46 @@ period_presets: list[tuple[str, date | None, date | None]] = [
 ]
 period_labels = [p[0] for p in period_presets]
 
+# Linha 1: Projeto · Status · Apenas pendentes (igual Produtos)
 fc1, fc2, fc3 = st.columns([1.6, 1.6, 1.2])
 with fc1:
     f_projects = st.multiselect("Projeto", projects_all, default=[])
 with fc2:
-    f_people = st.multiselect("Responsável", people_all, default=[])
-with fc3:
-    f_types = st.multiselect("Tipo de amostra", types_all, default=[])
-
-fc4, fc5, fc6 = st.columns([1.6, 1.6, 1.2])
-with fc4:
     f_status = st.multiselect(
         "Status",
         LAB_STATUS_OPTIONS,
         default=[],
         format_func=lambda s: STATUS_LABEL.get(s, s),
     )
-with fc5:
+with fc3:
+    only_pending = st.toggle(
+        "Apenas pendentes", value=False,
+        help="Oculta LAUDO_RECEBIDO e CONCLUIDO",
+    )
+
+# Linha 2: Período · Incluir atrasadas · Incluir sem previsão (igual Produtos)
+fc4, fc5, fc6 = st.columns([2.0, 1.2, 1.2])
+with fc4:
     sel_period = st.selectbox(
         "Atalho (período pela Previsão)",
         period_labels,
         index=0,
         help="Filtra amostras cuja previsão de liberação cai no período.",
     )
-with fc6:
-    only_pending = st.toggle(
-        "Apenas pendentes",
-        value=False,
-        help="Oculta LAUDO_RECEBIDO e CONCLUIDO",
-    )
-
-fc7, fc8 = st.columns([1.5, 1.5])
-with fc7:
+with fc5:
     include_overdue = st.toggle(
         "Incluir atrasadas",
         value=False,
-        help="Mostra amostras com previsão vencida e ainda não concluídas, fora do período.",
+        help="Mostra amostras com previsão vencida e não concluídas, fora do período.",
     )
-with fc8:
+with fc6:
     include_undated = st.toggle(
         "Incluir sem previsão",
         value=False,
-        help="Mostra amostras sem previsão de liberação.",
+        help="Mostra amostras sem previsão cadastrada.",
     )
 
-# Resolução do período
+# Período manual
 chosen = next(p for p in period_presets if p[0] == sel_period)
 if chosen[0] == "(manual)":
     period = st.date_input(
@@ -399,10 +458,6 @@ else:
 mask = pd.Series(True, index=df.index)
 if f_projects:
     mask &= df["project_code"].isin(f_projects)
-if f_people:
-    mask &= df["assignee_name"].isin(f_people)
-if f_types:
-    mask &= df["sample_type"].isin(f_types)
 if f_status:
     mask &= df["status"].isin(f_status)
 if only_pending:
@@ -452,7 +507,7 @@ st.divider()
 
 
 # ==========================================================
-# Busca + ordenação
+# Busca + ordenação + filtros refinados (Tipo/Lab/Resp)
 # ==========================================================
 st.subheader("Amostras")
 st.caption("Edite os campos e clique em **Salvar alterações**. Marque **Excluir?** para remover linhas.")
@@ -469,19 +524,36 @@ SORT_OPTIONS = {
 tc1, tc2 = st.columns([2.5, 1.5])
 with tc1:
     search = st.text_input(
-        "Buscar (Projeto · Tipo · Responsável · Obs)",
+        "Buscar (Projeto · Tipo · Lab · Responsável · Obs)",
         value="",
-        placeholder="Ex.: água, ictio, fulano, ASSCAF...",
+        placeholder="Ex.: bentos, biofile, ASSCAF, fulano...",
     )
 with tc2:
     sort_label = st.selectbox("Ordenar por", list(SORT_OPTIONS.keys()), index=0)
+
+rc1, rc2, rc3 = st.columns(3)
+with rc1:
+    f_types = st.multiselect("Tipo de amostra", type_names_sorted, default=[])
+with rc2:
+    f_labs = st.multiselect("Laboratório", labs_all, default=[])
+with rc3:
+    f_people = st.multiselect("Responsável", people_all, default=[])
+
+if f_types:
+    df_f = df_f[df_f["sample_types_list"].apply(lambda lst: any(t in lst for t in f_types))].reset_index(drop=True)
+if f_labs:
+    df_f = df_f[df_f["lab_name"].isin(f_labs)].reset_index(drop=True)
+if f_people:
+    df_f = df_f[df_f["assignee_name"].isin(f_people)].reset_index(drop=True)
 
 if search.strip():
     q = search.strip().lower()
     haystack = (
         df_f["project_code"].fillna("").astype(str).str.lower()
         + " | "
-        + df_f["sample_type"].fillna("").astype(str).str.lower()
+        + df_f["sample_types_list"].apply(lambda lst: ", ".join(lst).lower())
+        + " | "
+        + df_f["lab_name"].fillna("").astype(str).str.lower()
         + " | "
         + df_f["assignee_name"].fillna("").astype(str).str.lower()
         + " | "
@@ -499,7 +571,7 @@ if df_f.empty:
 
 
 # ==========================================================
-# Editor
+# Editor principal
 # ==========================================================
 people_names_sorted = sorted({n for n in safe_text_list(df_people["name"]) if n}) if not df_people.empty else []
 name_to_id = {row["name"]: row["id"] for _, row in df_people.iterrows()} if not df_people.empty else {}
@@ -509,15 +581,16 @@ status_labels = [STATUS_LABEL.get(s, s) for s in safe_text_list(df_f["status"], 
 
 df_show = pd.DataFrame(
     {
-        "Projeto":     safe_text_list(df_f["project_code"]),
-        "Tipo":        safe_text_list(df_f["sample_type"]),
-        "Responsável": safe_text_list(df_f["assignee_name"]),
-        "Status":      status_labels,
-        "Entrega":     [to_date(x) for x in df_f["shipment_date"].tolist()],
+        "Projeto":      safe_text_list(df_f["project_code"]),
+        "Tipos":        [", ".join(lst) for lst in df_f["sample_types_list"].tolist()],
+        "Laboratório":  safe_text_list(df_f["lab_name"]),
+        "Responsável":  safe_text_list(df_f["assignee_name"]),
+        "Status":       status_labels,
+        "Entrega":      [to_date(x) for x in df_f["shipment_date"].tolist()],
         "Prazo (dias)": df_f["sla_days"].fillna(DEFAULT_SLA_DAYS).astype(int).tolist(),
-        "Previsão":    [to_date(x) for x in df_f["expected_release_date"].tolist()],
-        "Obs":         safe_text_list(df_f["notes"]),
-        "Excluir?":    [False] * len(df_f),
+        "Previsão":     [to_date(x) for x in df_f["expected_release_date"].tolist()],
+        "Obs":          safe_text_list(df_f["notes"]),
+        "Excluir?":     [False] * len(df_f),
     },
     index=ids,
 )
@@ -530,19 +603,21 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="fixed",
     column_config={
-        "Projeto":     st.column_config.TextColumn(disabled=True, width="small"),
-        "Tipo":        st.column_config.SelectboxColumn(
-            options=type_names_sorted,
-            width="medium",
-            help="Tipos cadastrados em lab_sample_types.",
+        "Projeto":      st.column_config.TextColumn(disabled=True, width="small"),
+        "Tipos":        st.column_config.TextColumn(
+            disabled=True, width="medium",
+            help="Para alterar os tipos, use **Editar tipos** abaixo da tabela.",
         ),
-        "Responsável": st.column_config.SelectboxColumn(
-            options=[""] + people_names_sorted,
-            width="medium",
-            help="Selecione um responsável já cadastrado. Vazio = sem responsável.",
+        "Laboratório":  st.column_config.SelectboxColumn(
+            options=[""] + lab_names_sorted, width="medium",
+            help="Vazio = sem laboratório. Cadastre novos no expander acima.",
         ),
-        "Status":      st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
-        "Entrega":     st.column_config.DateColumn(
+        "Responsável":  st.column_config.SelectboxColumn(
+            options=[""] + people_names_sorted, width="medium",
+            help="Vazio = sem responsável.",
+        ),
+        "Status":       st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
+        "Entrega":      st.column_config.DateColumn(
             format="DD/MM/YYYY", width="small",
             help="Data em que as amostras foram entregues ao laboratório.",
         ),
@@ -550,21 +625,20 @@ edited = st.data_editor(
             min_value=0, max_value=365, step=1, width="small",
             help="Prazo do laboratório para liberar os laudos.",
         ),
-        "Previsão":    st.column_config.DateColumn(
+        "Previsão":     st.column_config.DateColumn(
             format="DD/MM/YYYY", width="small",
-            help="Recalculada (Entrega + Prazo) se você não tocar; "
-                 "edite manualmente para travar a data.",
+            help="Recalculada (Entrega + Prazo) ao salvar se você não a editar manualmente.",
         ),
-        "Obs":         st.column_config.TextColumn(width="large"),
-        "Excluir?":    st.column_config.CheckboxColumn(width="small"),
+        "Obs":          st.column_config.TextColumn(width="large"),
+        "Excluir?":     st.column_config.CheckboxColumn(width="small"),
     },
     key="lab_editor",
 )
 
 st.caption(
-    "💡 **Previsão** é recalculada automaticamente ao salvar quando você muda "
-    "**Entrega** ou **Prazo (dias)** *e* não editou Previsão manualmente. "
-    "Se editar Previsão diretamente, o valor manual é mantido."
+    "💡 **Previsão** é recalculada ao salvar quando você muda **Entrega** ou "
+    "**Prazo (dias)** *e* não editou Previsão manualmente. "
+    "Para alterar os **Tipos** de uma entrega, use a seção *Editar tipos* abaixo."
 )
 
 bc1, bc2, _ = st.columns([1, 1, 4])
@@ -583,7 +657,6 @@ if save_clicked:
         before = df_show.loc[sample_id]
         after = edited.loc[sample_id]
 
-        # Exclusão
         if bool(after["Excluir?"]):
             try:
                 sb.table("lab_samples").delete().eq("id", sample_id).execute()
@@ -609,13 +682,12 @@ if save_clicked:
 
         before_resp = norm_text(before["Responsável"])
         after_resp = norm_text(after["Responsável"])
-        before_tipo = norm_text(before["Tipo"]) or ""
-        after_tipo = norm_text(after["Tipo"]) or ""
+        before_lab = norm_text(before["Laboratório"])
+        after_lab = norm_text(after["Laboratório"])
         before_obs = norm_text(before["Obs"])
         after_obs = norm_text(after["Obs"])
 
-        # Auto-cálculo: se usuário não editou Previsão manualmente
-        # mas mexeu em Entrega ou Prazo → recalcula.
+        # Auto-cálculo da Previsão
         prev_user_changed = before_prev != after_prev
         if not prev_user_changed and (before_entrega != after_entrega or before_sla != after_sla):
             recalc = calc_expected(after_entrega, after_sla)
@@ -628,34 +700,20 @@ if save_clicked:
             or before_sla != after_sla
             or before_prev != after_prev
             or before_resp != after_resp
-            or before_tipo != after_tipo
+            or before_lab != after_lab
             or before_obs != after_obs
         )
         if not diff:
             continue
 
-        if not after_tipo:
-            fail += 1
-            errors.append(f"{sample_id}: Tipo de amostra é obrigatório.")
-            continue
-
-        after_type_id = type_name_to_id.get(after_tipo)
-        if not after_type_id:
-            fail += 1
-            errors.append(
-                f"{sample_id}: Tipo '{after_tipo}' não cadastrado em lab_sample_types."
-            )
-            continue
-
         payload = {
-            "sample_type_id": after_type_id,
-            "sample_type": after_tipo,  # compat com coluna texto
             "status": after_status,
             "shipment_date": after_entrega.isoformat() if after_entrega else None,
             "sla_days": int(after_sla),
             "expected_release_date": after_prev.isoformat() if after_prev else None,
             "notes": after_obs,
             "assignee_id": name_to_id.get(after_resp) if after_resp else None,
+            "lab_id": lab_name_to_id.get(after_lab) if after_lab else None,
         }
         try:
             resp = (
@@ -689,3 +747,46 @@ if save_clicked:
         st.rerun()
     else:
         st.info("Nenhuma alteração a salvar.")
+
+
+# ==========================================================
+# Editar tipos de uma entrega existente
+# ==========================================================
+st.divider()
+with st.expander("✏️ Editar tipos de amostras de uma entrega", expanded=False):
+    if df_f.empty or not type_names_sorted:
+        st.caption("Sem entregas para editar.")
+    else:
+        labels = []
+        label_to_pos: dict[str, int] = {}
+        for i in range(len(df_f)):
+            r = df_f.iloc[i]
+            label = (
+                f"{r['project_code']} · "
+                f"{', '.join(to_list(r['sample_types'])) or '—'} · "
+                f"entrega {to_date(r['shipment_date']) or '—'}"
+            )
+            labels.append(label)
+            label_to_pos[label] = i
+        sel = st.selectbox("Entrega", labels, key="edit_types_sel")
+        row = df_f.iloc[label_to_pos[sel]]
+        current_types = to_list(row["sample_types"])
+        new_types = st.multiselect(
+            "Tipos de amostra",
+            type_names_sorted,
+            default=[t for t in current_types if t in type_names_sorted],
+            key="edit_types_multi",
+        )
+        if st.button("Salvar tipos", type="primary", key="edit_types_save"):
+            if not new_types:
+                st.error("Selecione ao menos um tipo.")
+            else:
+                try:
+                    sb.table("lab_samples").update(
+                        {"sample_types": new_types}, returning="representation"
+                    ).eq("id", str(row["sample_id"])).execute()
+                    st.success("Tipos atualizados.")
+                    refresh()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Falha: {_api_error_message(e)}")
