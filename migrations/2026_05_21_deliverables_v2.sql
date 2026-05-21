@@ -16,7 +16,6 @@ select
   vpt.start_date,
   vpt.end_date,
   vpt.status                                    as task_status,
-  vpt.assignee_id,
   vpt.assignee_names,
   coalesce(d.delivery_status,'NAO_INICIADO')    as delivery_status,
   coalesce(d.needs_revision, false)             as needs_revision,
