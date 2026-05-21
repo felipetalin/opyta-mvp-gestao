@@ -192,8 +192,6 @@ if df.empty:
 # Filtros
 # ==========================================================
 projects_all = sorted({p for p in safe_text_list(df["project_code"]) if p})
-disc_all = sorted({d for d in safe_text_list(df["discipline"]) if d})
-ent_all = sorted({e for e in safe_text_list(df["enterprise"]) if e})
 
 # --- Atalhos de período (mesma lógica do Gantt) ---
 today = date.today()
@@ -208,54 +206,50 @@ prev_start, _ = month_range(prev_first)
 _, next2_end = month_range(next2_first)
 
 period_presets: list[tuple[str, date | None, date | None]] = [
-    ("Tudo", None, None),
     (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
     (f"Próximo mês ({month_label(next_first)})", next_start, next_end),
     (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
     (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
     (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
     ("(manual)", None, None),
+    ("Tudo", None, None),
 ]
 period_labels = [p[0] for p in period_presets]
-default_period_idx = 1  # Mês atual
+default_period_idx = 0  # Mês atual
 
-fc1, fc2, fc3, fc4 = st.columns([1.4, 1.2, 1.4, 1.4])
+fc1, fc2, fc3 = st.columns([1.6, 1.6, 1.2])
 with fc1:
     f_projects = st.multiselect("Projeto", projects_all, default=[])
 with fc2:
-    f_disc = st.multiselect("Disciplina", disc_all, default=[])
-with fc3:
-    f_ent = st.multiselect("Empreendimento", ent_all, default=[])
-with fc4:
     f_status = st.multiselect(
         "Status",
         DELIVERY_STATUS_OPTIONS,
         default=[],
         format_func=lambda s: STATUS_LABEL.get(s, s),
     )
+with fc3:
+    only_pending = st.toggle("Apenas pendentes", value=False, help="Oculta ENTREGUE e FATURADO")
 
-fc5, fc6, fc7, fc8 = st.columns([2.0, 1.2, 1.2, 1.2])
-with fc5:
+fc4, fc5, fc6 = st.columns([2.0, 1.2, 1.2])
+with fc4:
     sel_period = st.selectbox(
         "Atalho (período pelo Prazo)",
         period_labels,
         index=default_period_idx,
         help="Filtra produtos cuja data de Prazo cai dentro do período.",
     )
-with fc6:
+with fc5:
     include_overdue = st.toggle(
         "Incluir atrasados",
-        value=True,
+        value=False,
         help="Mostra também produtos com Prazo vencido (não entregues/faturados), mesmo fora do período.",
     )
-with fc7:
+with fc6:
     include_undated = st.toggle(
         "Incluir sem prazo",
-        value=True,
+        value=False,
         help="Mostra produtos sem data de Prazo cadastrada.",
     )
-with fc8:
-    only_pending = st.toggle("Apenas pendentes", value=False, help="Oculta ENTREGUE e FATURADO")
 
 # Resolução do período
 chosen = next(p for p in period_presets if p[0] == sel_period)
@@ -281,10 +275,6 @@ else:
 mask = pd.Series(True, index=df.index)
 if f_projects:
     mask &= df["project_code"].isin(f_projects)
-if f_disc:
-    mask &= df["discipline"].isin(f_disc)
-if f_ent:
-    mask &= df["enterprise"].isin(f_ent)
 if f_status:
     mask &= df["delivery_status"].isin(f_status)
 if only_pending:
@@ -345,19 +335,21 @@ ids = safe_text_list(df_f["task_id"])
 
 status_labels = [STATUS_LABEL.get(s, s) for s in safe_text_list(df_f["delivery_status"], "NAO_INICIADO")]
 
+# Coluna Responsável vem de v_portfolio_tasks via v_deliverables (assignee_names)
+resp_col = df_f["assignee_names"] if "assignee_names" in df_f.columns else pd.Series([""] * len(df_f))
+
 df_show = pd.DataFrame(
     {
-        "Projeto": safe_text_list(df_f["project_code"]),
-        "Produto": safe_text_list(df_f["product_name"]),
-        "Disciplina": safe_text_list(df_f["discipline"]),
-        "Empreendimento": safe_text_list(df_f["enterprise"]),
-        "Status": status_labels,
-        "Revisão?": df_f["needs_revision"].fillna(False).astype(bool).tolist(),
-        "Enviado?": df_f["sent_to_client"].fillna(False).astype(bool).tolist(),
-        "Entrega": [to_date(x) for x in df_f["delivery_date"].tolist()],
+        "Projeto":     safe_text_list(df_f["project_code"]),
+        "Produto":     safe_text_list(df_f["product_name"]),
+        "Responsável": safe_text_list(resp_col),
+        "Status":      status_labels,
+        "Revisão?":    df_f["needs_revision"].fillna(False).astype(bool).tolist(),
+        "Enviado?":    df_f["sent_to_client"].fillna(False).astype(bool).tolist(),
+        "Entrega":     [to_date(x) for x in df_f["delivery_date"].tolist()],
         "Faturamento": [to_date(x) for x in df_f["invoice_date"].tolist()],
-        "Prazo": [to_date(x) for x in df_f["end_date"].tolist()],
-        "Obs": safe_text_list(df_f["tracking_notes"]),
+        "Prazo":       [to_date(x) for x in df_f["end_date"].tolist()],
+        "Obs":         safe_text_list(df_f["tracking_notes"]),
     },
     index=ids,
 )
@@ -370,19 +362,24 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="fixed",
     column_config={
-        "Projeto":        st.column_config.TextColumn(disabled=True, width="small"),
-        "Produto":        st.column_config.TextColumn(disabled=True, width="large"),
-        "Disciplina":     st.column_config.TextColumn(width="small"),
-        "Empreendimento": st.column_config.TextColumn(width="medium"),
-        "Status":         st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
-        "Revisão?":       st.column_config.CheckboxColumn(width="small"),
-        "Enviado?":       st.column_config.CheckboxColumn(width="small"),
-        "Entrega":        st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
-        "Faturamento":    st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
-        "Prazo":          st.column_config.DateColumn(format="DD/MM/YYYY", disabled=True, width="small"),
-        "Obs":            st.column_config.TextColumn(width="large"),
+        "Projeto":     st.column_config.TextColumn(disabled=True, width="small"),
+        "Produto":     st.column_config.TextColumn(disabled=True, width="large"),
+        "Responsável": st.column_config.TextColumn(disabled=True, width="medium"),
+        "Status":      st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
+        "Revisão?":    st.column_config.CheckboxColumn(width="small"),
+        "Enviado?":    st.column_config.CheckboxColumn(width="small", help="Marcar preenche Entrega com hoje se vazia"),
+        "Entrega":     st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Faturamento": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
+        "Prazo":       st.column_config.DateColumn(format="DD/MM/YYYY", disabled=True, width="small"),
+        "Obs":         st.column_config.TextColumn(width="large"),
     },
     key="deliverables_editor",
+)
+
+st.caption(
+    "💡 Auto-datação ao salvar: marcar **Enviado?** ou status **Entregue** "
+    "preenche **Entrega** com hoje se estiver vazia. Status **Faturado** "
+    "preenche **Faturamento** com hoje."
 )
 
 bc1, bc2, _ = st.columns([1, 1, 4])
@@ -402,14 +399,30 @@ if save_clicked:
         before_status = LABEL_TO_STATUS.get(before["Status"], "NAO_INICIADO")
         after_status = LABEL_TO_STATUS.get(after["Status"], "NAO_INICIADO")
 
+        after_sent = bool(after["Enviado?"])
+        before_sent = bool(before["Enviado?"])
+        after_rev = bool(after["Revisão?"])
+
+        after_entrega = after["Entrega"] or None
+        after_fat = after["Faturamento"] or None
+
+        # --- Auto-datação ---
+        # Status virou ENTREGUE OU "Enviado?" foi marcado agora → entrega = hoje (se vazia)
+        if after_entrega is None and (
+            (after_status == "ENTREGUE" and before_status != "ENTREGUE")
+            or (after_sent and not before_sent)
+        ):
+            after_entrega = today
+        # Status virou FATURADO → faturamento = hoje (se vazio)
+        if after_fat is None and after_status == "FATURADO" and before_status != "FATURADO":
+            after_fat = today
+
         diff = (
             before_status != after_status
-            or bool(before["Revisão?"]) != bool(after["Revisão?"])
-            or bool(before["Enviado?"]) != bool(after["Enviado?"])
-            or (before["Entrega"] or None) != (after["Entrega"] or None)
-            or (before["Faturamento"] or None) != (after["Faturamento"] or None)
-            or norm_text(before["Disciplina"]) != norm_text(after["Disciplina"])
-            or norm_text(before["Empreendimento"]) != norm_text(after["Empreendimento"])
+            or bool(before["Revisão?"]) != after_rev
+            or before_sent != after_sent
+            or (before["Entrega"] or None) != after_entrega
+            or (before["Faturamento"] or None) != after_fat
             or norm_text(before["Obs"]) != norm_text(after["Obs"])
         )
         if not diff:
@@ -419,12 +432,10 @@ if save_clicked:
             {
                 "task_id": task_id,
                 "delivery_status": after_status,
-                "needs_revision": bool(after["Revisão?"]),
-                "sent_to_client": bool(after["Enviado?"]),
-                "delivery_date": after["Entrega"].isoformat() if after["Entrega"] else None,
-                "invoice_date": after["Faturamento"].isoformat() if after["Faturamento"] else None,
-                "discipline": norm_text(after["Disciplina"]),
-                "enterprise": norm_text(after["Empreendimento"]),
+                "needs_revision": after_rev,
+                "sent_to_client": after_sent,
+                "delivery_date": after_entrega.isoformat() if after_entrega else None,
+                "invoice_date": after_fat.isoformat() if after_fat else None,
                 "notes": norm_text(after["Obs"]),
             }
         )
