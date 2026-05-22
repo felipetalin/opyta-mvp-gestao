@@ -64,10 +64,10 @@ DELIVERY_STATUS_OPTIONS = [
     "CONCLUIDO",
 ]
 STATUS_LABEL = {
-    "NAO_INICIADO": "Não iniciado",
-    "EM_ELABORACAO": "Em elaboração",
-    "EM_REVISAO": "Em revisão",
-    "CONCLUIDO": "Concluído",
+    "NAO_INICIADO": "⚪ Não iniciado",
+    "EM_ELABORACAO": "🟡 Em elaboração",
+    "EM_REVISAO": "🟠 Em revisão",
+    "CONCLUIDO": "🟢 Concluído",
 }
 LABEL_TO_STATUS = {v: k for k, v in STATUS_LABEL.items()}
 
@@ -236,26 +236,7 @@ df["delivery_status_ui"] = [to_ui_status(s) for s in status_all]
 projects_all = sorted({p for p in safe_text_list(df["project_code"]) if p})
 
 cur_first = shift_month_first(today, 0)
-next_first = shift_month_first(today, 1)
-prev_first = shift_month_first(today, -1)
-next2_first = shift_month_first(today, 2)
-
 cur_start, cur_end = month_range(cur_first)
-next_start, next_end = month_range(next_first)
-prev_start, _ = month_range(prev_first)
-_, next2_end = month_range(next2_first)
-
-period_presets: list[tuple[str, date | None, date | None]] = [
-    (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
-    (f"Próximo mês ({month_label(next_first)})", next_start, next_end),
-    (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
-    (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
-    (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
-    ("(manual)", None, None),
-    ("Tudo", None, None),
-]
-period_labels = [p[0] for p in period_presets]
-default_period_idx = 0  # Mês atual por padrão
 
 fc1, fc2, fc3 = st.columns([1.6, 1.6, 1.2])
 with fc1:
@@ -270,29 +251,8 @@ with fc2:
 with fc3:
     only_pending = st.toggle("Apenas não concluídos", value=False)
 
-fc4, _, fc6 = st.columns([2.0, 1.2, 1.2])
-with fc4:
-    sel_period = st.selectbox(
-        "Atalho (período pelo Prazo)",
-        period_labels,
-        index=default_period_idx,
-        help="Filtra produtos cuja data de Prazo cai dentro do período.",
-    )
-with fc6:
-    include_undated = st.toggle("Incluir sem prazo", value=False)
-
-chosen = next(p for p in period_presets if p[0] == sel_period)
-if chosen[0] == "(manual)":
-    period = st.date_input("Período manual (Prazo)", value=(cur_start, cur_end), format="DD/MM/YYYY")
-    if isinstance(period, tuple) and len(period) == 2:
-        p_start, p_end = period
-    else:
-        p_start, p_end = cur_start, cur_end
-elif chosen[0] == "Tudo":
-    p_start, p_end = None, None
-else:
-    p_start, p_end = chosen[1], chosen[2]
-    st.caption(f"Período (Prazo): **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
+p_start, p_end = cur_start, cur_end
+st.caption(f"Mês atual travado pelo Prazo: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 
 mask = pd.Series(True, index=df.index)
 if f_projects:
@@ -303,17 +263,17 @@ if only_pending:
     mask &= df["delivery_status_ui"] != "CONCLUIDO"
 
 end_dates = pd.to_datetime(df["end_date"], errors="coerce").dt.date
-if p_start is not None and p_end is not None:
-    in_window = end_dates.between(p_start, p_end)
-    if include_undated:
-        mask &= in_window | end_dates.isna()
-    else:
-        mask &= in_window
-else:
-    if not include_undated:
-        mask &= end_dates.notna()
+mask &= end_dates.between(p_start, p_end)
 
 df_f = df.loc[mask].reset_index(drop=True)
+
+st.caption(f"Quantitativo do mês: **{month_label(cur_first)}**")
+qm1, qm2, qm3, qm4, qm5 = st.columns(5)
+qm1.metric("Total", len(df_f))
+qm2.metric(STATUS_LABEL["NAO_INICIADO"], int((df_f["delivery_status_ui"] == "NAO_INICIADO").sum()))
+qm3.metric(STATUS_LABEL["EM_ELABORACAO"], int((df_f["delivery_status_ui"] == "EM_ELABORACAO").sum()))
+qm4.metric(STATUS_LABEL["EM_REVISAO"], int((df_f["delivery_status_ui"] == "EM_REVISAO").sum()))
+qm5.metric(STATUS_LABEL["CONCLUIDO"], int((df_f["delivery_status_ui"] == "CONCLUIDO").sum()))
 
 
 # ==========================================================
@@ -362,7 +322,7 @@ if sort_col in df_f.columns and not df_f.empty:
 if df_f.empty:
     st.info(
         f"Nenhum produto corresponde aos filtros/busca atuais. "
-        f"Existem **{len(df)}** produto(s) no total — tente o atalho **Tudo** ou amplie o período."
+        f"Existem **{len(df)}** produto(s) no total."
     )
     st.stop()
 
@@ -435,8 +395,7 @@ status_label_options = [STATUS_LABEL[s] for s in DELIVERY_STATUS_OPTIONS]
 _editor_signature = hash(
     (
         tuple(f_projects), tuple(f_status),
-        only_pending, include_undated,
-        sel_period, sort_label, search.strip(),
+        only_pending, sort_label, search.strip(),
         tuple(ids),
     )
 )
