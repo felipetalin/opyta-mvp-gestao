@@ -507,6 +507,17 @@ edited = st.data_editor(
     key=f"deliverables_editor::{_editor_signature}",
 )
 
+# Recalcula colunas derivadas a partir do que está na tela (evita status "travado").
+try:
+    _deadline_series = edited.get("Prazo de entrega ao cliente")
+    _delivery_series = edited.get("Data de entrega ao cliente")
+    if _deadline_series is not None and _delivery_series is not None:
+        edited["Status da entrega"] = [
+            delivery_status_for(p, d, today) for p, d in zip(_deadline_series.tolist(), _delivery_series.tolist())
+        ]
+except Exception:
+    pass
+
 to_delete_ids = edited.index[edited["Excluir?"] == True].astype(str).tolist()  # noqa: E712
 
 if to_delete_ids:
