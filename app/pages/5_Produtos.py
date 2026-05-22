@@ -568,6 +568,10 @@ if save_clicked:
         before_obs = norm_text(before["Obs"])
         after_obs = norm_text(after["Obs"])
 
+        # Se tem entrega real, considera o produto concluido automaticamente.
+        if after_entrega is not None:
+            after_status_ui = "CONCLUIDO"
+
         diff = (
             before_status_ui != after_status_ui
             or before_entrega != after_entrega
