@@ -236,9 +236,27 @@ df["delivery_status_ui"] = [to_ui_status(s) for s in status_all]
 projects_all = sorted({p for p in safe_text_list(df["project_code"]) if p})
 
 cur_first = shift_month_first(today, 0)
-cur_start, cur_end = month_range(cur_first)
+next_first = shift_month_first(today, 1)
+prev_first = shift_month_first(today, -1)
+next2_first = shift_month_first(today, 2)
 
-fc1, fc2, fc3 = st.columns([1.6, 1.6, 1.2])
+cur_start, cur_end = month_range(cur_first)
+next_start, next_end = month_range(next_first)
+prev_start, _ = month_range(prev_first)
+_, next2_end = month_range(next2_first)
+
+period_presets: list[tuple[str, date | None, date | None]] = [
+    ("(manual)", None, None),
+    (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
+    (f"Próximo mês ({month_label(next_first)})", next_start, next_end),
+    (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
+    (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
+    (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
+]
+period_labels = [p[0] for p in period_presets]
+default_period_idx = 1 if len(period_labels) > 1 else 0
+
+fc1, fc2, fc3, fc4 = st.columns([1.4, 1.4, 1.7, 1.1])
 with fc1:
     f_projects = st.multiselect("Projeto", projects_all, default=[])
 with fc2:
@@ -249,10 +267,20 @@ with fc2:
         format_func=lambda s: STATUS_LABEL.get(s, s),
     )
 with fc3:
+    sel_period = st.selectbox("Atalho (período)", period_labels, index=default_period_idx)
+with fc4:
     only_pending = st.toggle("Apenas não concluídos", value=False)
 
-p_start, p_end = cur_start, cur_end
-st.caption(f"Mês atual travado pelo Prazo: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
+chosen = next(p for p in period_presets if p[0] == sel_period)
+if chosen[0] != "(manual)":
+    p_start, p_end = chosen[1], chosen[2]
+    st.caption(f"Período (Prazo): **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
+else:
+    period = st.date_input("Período (manual)", value=(cur_start, cur_end), format="DD/MM/YYYY")
+    if isinstance(period, tuple) and len(period) == 2:
+        p_start, p_end = period
+    else:
+        p_start, p_end = cur_start, cur_end
 
 mask = pd.Series(True, index=df.index)
 if f_projects:
@@ -267,7 +295,7 @@ mask &= end_dates.between(p_start, p_end)
 
 df_f = df.loc[mask].reset_index(drop=True)
 
-st.caption(f"Quantitativo do mês: **{month_label(cur_first)}**")
+st.caption(f"Quantitativo do período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 qm1, qm2, qm3, qm4, qm5 = st.columns(5)
 qm1.metric("Total", len(df_f))
 qm2.metric(STATUS_LABEL["NAO_INICIADO"], int((df_f["delivery_status_ui"] == "NAO_INICIADO").sum()))
@@ -395,7 +423,7 @@ status_label_options = [STATUS_LABEL[s] for s in DELIVERY_STATUS_OPTIONS]
 _editor_signature = hash(
     (
         tuple(f_projects), tuple(f_status),
-        only_pending, sort_label, search.strip(),
+        sel_period, p_start, p_end, only_pending, sort_label, search.strip(),
         tuple(ids),
     )
 )
