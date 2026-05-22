@@ -457,6 +457,10 @@ df_show["Status da entrega"] = [
     for p, d in zip(df_show["Prazo de entrega ao cliente"].tolist(), df_show["Data de entrega ao cliente"].tolist())
 ]
 
+# Garante que o editor e o loop de save enderecem linhas por task_id (string).
+df_show.index = df_show.index.astype(str)
+ids = df_show.index.tolist()
+
 status_label_options = [STATUS_LABEL[s] for s in DELIVERY_STATUS_OPTIONS]
 
 # Assinatura dos filtros — força reset do data_editor quando filtros mudam.
@@ -501,6 +505,16 @@ edited = st.data_editor(
     key=f"deliverables_editor::{_editor_signature}",
 )
 
+# Em alguns ambientes/versoes do Streamlit, o data_editor pode devolver um RangeIndex
+# mesmo quando o index foi escondido. Se isso acontecer, alinhamos por posicao para
+# garantir que o "Salvar" aplique as mudancas na task_id correta.
+try:
+    if len(edited) == len(df_show) and set(edited.index.astype(str)) != set(df_show.index.astype(str)):
+        edited = edited.copy()
+        edited.index = df_show.index.copy()
+except Exception:
+    pass
+
 # Recalcula colunas derivadas a partir do que está na tela (evita status "travado").
 try:
     _deadline_series = edited.get("Prazo de entrega ao cliente")
@@ -509,6 +523,11 @@ try:
         edited["Status da entrega"] = [
             delivery_status_for(p, d, today) for p, d in zip(_deadline_series.tolist(), _delivery_series.tolist())
         ]
+except Exception:
+    pass
+
+try:
+    edited.index = edited.index.astype(str)
 except Exception:
     pass
 
