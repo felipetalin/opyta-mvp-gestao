@@ -170,6 +170,35 @@ def delivery_status_for(deadline, delivery_date, today_: date) -> str:
     return DELIVERY_DATE_STATUS["ENTREGUE_COM_ATRASO"]
 
 
+def apply_data_editor_state(base: pd.DataFrame, returned: pd.DataFrame, key: str) -> pd.DataFrame:
+    out = returned.copy()
+    if len(out) == len(base):
+        out.index = base.index.copy()
+
+    state = st.session_state.get(key)
+    if not isinstance(state, dict):
+        return out
+
+    for row_key, changes in (state.get("edited_rows") or {}).items():
+        if not isinstance(changes, dict):
+            continue
+        idx = None
+        try:
+            pos = int(row_key)
+            if 0 <= pos < len(out):
+                idx = out.index[pos]
+        except Exception:
+            if str(row_key) in out.index.astype(str):
+                idx = out.index[out.index.astype(str).tolist().index(str(row_key))]
+        if idx is None:
+            continue
+        for col, val in changes.items():
+            if col in out.columns:
+                out.at[idx, col] = val
+
+    return out
+
+
 def month_range(d: date) -> tuple[date, date]:
     first = d.replace(day=1)
     if first.month == 12:
@@ -477,6 +506,7 @@ _editor_signature = hash(
         tuple(ids),
     )
 )
+editor_key = f"deliverables_editor::{_editor_signature}"
 
 edited = st.data_editor(
     df_show,
@@ -507,18 +537,10 @@ edited = st.data_editor(
         "Obs": st.column_config.TextColumn(width="large"),
         "Excluir?": st.column_config.CheckboxColumn("Excluir?", width="small", help="Marque para excluir."),
     },
-    key=f"deliverables_editor::{_editor_signature}",
+    key=editor_key,
 )
 
-# Em alguns ambientes/versoes do Streamlit, o data_editor pode devolver um RangeIndex
-# mesmo quando o index foi escondido. Se isso acontecer, alinhamos por posicao para
-# garantir que o "Salvar" aplique as mudancas na task_id correta.
-try:
-    if len(edited) == len(df_show) and set(edited.index.astype(str)) != set(df_show.index.astype(str)):
-        edited = edited.copy()
-        edited.index = df_show.index.copy()
-except Exception:
-    pass
+edited = apply_data_editor_state(df_show, edited, editor_key)
 
 # Recalcula colunas derivadas a partir do que está na tela (evita status "travado").
 try:
@@ -670,7 +692,7 @@ if save_clicked:
             st.error(f"{fail} falha(s):")
             for err in errors:
                 st.code(err)
-        if ok or fail:
+        if ok and not fail:
             refresh()
             st.rerun()
 
