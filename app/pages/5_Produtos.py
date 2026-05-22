@@ -389,7 +389,7 @@ if df_f.empty:
 # Export CSV / Excel
 # ==========================================================
 def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "Projeto": safe_text_list(_df["project_code"]),
         "Produto": safe_text_list(_df["product_name"]),
         "Responsável": (
@@ -400,15 +400,12 @@ def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
         "Prazo de entrega interna": [to_date(x) for x in _df["end_date"].tolist()],
         "Prazo de entrega ao cliente": [to_date(x) for x in _df.get("client_due_date", pd.Series([None] * len(_df))).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in _df["delivery_date"].tolist()],
-        "Status da entrega": [
-            delivery_status_for(prazo, entrega, today)
-            for prazo, entrega in zip(
-                _df.get("client_due_date", pd.Series([None] * len(_df))).tolist(),
-                _df["delivery_date"].tolist(),
-            )
-        ],
         "Obs": safe_text_list(_df["tracking_notes"]),
     })
+    out["Status da entrega"] = [
+        delivery_status_for(p, d, today) for p, d in zip(out["Prazo de entrega ao cliente"].tolist(), out["Data de entrega ao cliente"].tolist())
+    ]
+    return out
 
 
 export_df = _build_export_df(df_f)
@@ -450,18 +447,15 @@ df_show = pd.DataFrame(
         "Prazo de entrega interna": [to_date(x) for x in df_f["end_date"].tolist()],
         "Prazo de entrega ao cliente": [to_date(x) for x in df_f.get("client_due_date", pd.Series([None] * len(df_f))).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in df_f["delivery_date"].tolist()],
-        "Status da entrega": [
-            delivery_status_for(prazo, entrega, today)
-            for prazo, entrega in zip(
-                df_f.get("client_due_date", pd.Series([None] * len(df_f))).tolist(),
-                df_f["delivery_date"].tolist(),
-            )
-        ],
         "Obs": safe_text_list(df_f["tracking_notes"]),
         "Excluir?": [False] * len(df_f),
     },
     index=ids,
 )
+df_show["Status da entrega"] = [
+    delivery_status_for(p, d, today)
+    for p, d in zip(df_show["Prazo de entrega ao cliente"].tolist(), df_show["Data de entrega ao cliente"].tolist())
+]
 
 status_label_options = [STATUS_LABEL[s] for s in DELIVERY_STATUS_OPTIONS]
 
