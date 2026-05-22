@@ -148,6 +148,14 @@ def safe_text_list(series: pd.Series, default: str = "") -> list[str]:
     return out
 
 
+def client_due_series(df_: pd.DataFrame) -> pd.Series:
+    if "client_due_date" in df_.columns:
+        return df_["client_due_date"]
+    if "enterprise" in df_.columns:
+        return df_["enterprise"]
+    return pd.Series([None] * len(df_), index=df_.index)
+
+
 def to_ui_status(status: str | None) -> str:
     s = (status or "NAO_INICIADO").strip().upper()
     s = LEGACY_STATUS_TO_UI.get(s, s)
@@ -197,6 +205,12 @@ def apply_data_editor_state(base: pd.DataFrame, returned: pd.DataFrame, key: str
                 out.at[idx, col] = val
 
     return out
+
+
+def clear_deliverables_editor_state() -> None:
+    for key in list(st.session_state.keys()):
+        if str(key).startswith("deliverables_editor::"):
+            del st.session_state[key]
 
 
 def month_range(d: date) -> tuple[date, date]:
@@ -354,6 +368,7 @@ end_dates = pd.to_datetime(df["end_date"], errors="coerce").dt.date
 mask &= end_dates.between(p_start, p_end)
 
 df_f = df.loc[mask].reset_index(drop=True)
+df_f["__client_due_date"] = [to_date(x) for x in client_due_series(df_f).tolist()]
 
 st.caption(f"Quantitativo do período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 qm1, qm2, qm3, qm4, qm5 = st.columns(5)
@@ -371,8 +386,8 @@ st.subheader("Produtos")
 st.caption("Edição rápida e inline para acompanhamento operacional.")
 
 SORT_OPTIONS = {
-    "Prazo de entrega ao cliente (mais próximo primeiro)": ("client_due_date", True),
-    "Prazo de entrega ao cliente (mais distante primeiro)": ("client_due_date", False),
+    "Prazo de entrega ao cliente (mais próximo primeiro)": ("__client_due_date", True),
+    "Prazo de entrega ao cliente (mais distante primeiro)": ("__client_due_date", False),
     "Prazo de entrega interna (mais próximo primeiro)": ("end_date", True),
     "Prazo de entrega interna (mais distante primeiro)": ("end_date", False),
     "Data de entrega ao cliente (mais recente primeiro)": ("delivery_date", False),
@@ -432,7 +447,7 @@ def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
         ),
         "Status do produto": [STATUS_LABEL.get(s, s) for s in safe_text_list(_df["delivery_status_ui"])],
         "Prazo de entrega interna": [to_date(x) for x in _df["end_date"].tolist()],
-        "Prazo de entrega ao cliente": [to_date(x) for x in _df.get("client_due_date", pd.Series([None] * len(_df))).tolist()],
+        "Prazo de entrega ao cliente": [to_date(x) for x in client_due_series(_df).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in _df["delivery_date"].tolist()],
         "Obs": safe_text_list(_df["tracking_notes"]),
     })
@@ -479,7 +494,7 @@ df_show = pd.DataFrame(
         "Responsável": safe_text_list(resp_col),
         "Status do produto": status_labels,
         "Prazo de entrega interna": [to_date(x) for x in df_f["end_date"].tolist()],
-        "Prazo de entrega ao cliente": [to_date(x) for x in df_f.get("client_due_date", pd.Series([None] * len(df_f))).tolist()],
+        "Prazo de entrega ao cliente": [to_date(x) for x in client_due_series(df_f).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in df_f["delivery_date"].tolist()],
         "Obs": safe_text_list(df_f["tracking_notes"]),
         "Excluir?": [False] * len(df_f),
@@ -504,6 +519,10 @@ _editor_signature = hash(
         tuple(f_projects), tuple(f_status),
         sel_period, p_start, p_end, only_pending, sort_label, search.strip(),
         tuple(ids),
+        tuple(str(x) for x in df_show["Status do produto"].tolist()),
+        tuple(str(x) for x in df_show["Prazo de entrega ao cliente"].tolist()),
+        tuple(str(x) for x in df_show["Data de entrega ao cliente"].tolist()),
+        tuple(str(x) for x in df_show["Obs"].tolist()),
     )
 )
 editor_key = f"deliverables_editor::{_editor_signature}"
@@ -589,6 +608,7 @@ save_clicked = bc1.button("Salvar alterações", type="primary")
 reload_clicked = bc2.button("Recarregar")
 
 if reload_clicked:
+    clear_deliverables_editor_state()
     refresh()
     st.rerun()
 
@@ -642,23 +662,30 @@ if save_clicked:
         keep_revision = bool(row.get("needs_revision", False))
         keep_sent = bool(row.get("sent_to_client", False))
         keep_invoice = to_date(row.get("invoice_date"))
+        keep_discipline = norm_text(row.get("discipline"))
+        keep_enterprise = norm_text(row.get("enterprise"))
 
         if after_status_ui == "CONCLUIDO" and after_entrega is None:
             label = f"{after.get('Projeto','?')} — {after.get('Produto','?')}"
             warnings.append(f"{label}: status **Concluído** sem data de entrega ao cliente.")
 
-        changes.append(
-            {
-                "task_id": task_id,
-                "delivery_status": after_status_db,
-                "needs_revision": keep_revision,
-                "sent_to_client": keep_sent,
-                "client_due_date": after_prazo_cliente.isoformat() if after_prazo_cliente else None,
-                "delivery_date": after_entrega.isoformat() if after_entrega else None,
-                "invoice_date": keep_invoice.isoformat() if keep_invoice else None,
-                "notes": after_obs,
-            }
-        )
+        payload = {
+            "task_id": task_id,
+            "delivery_status": after_status_db,
+            "needs_revision": keep_revision,
+            "sent_to_client": keep_sent,
+            "delivery_date": after_entrega.isoformat() if after_entrega else None,
+            "invoice_date": keep_invoice.isoformat() if keep_invoice else None,
+            "discipline": keep_discipline,
+            "enterprise": keep_enterprise,
+            "notes": after_obs,
+        }
+        if "client_due_date" in df.columns:
+            payload["client_due_date"] = after_prazo_cliente.isoformat() if after_prazo_cliente else None
+        else:
+            payload["enterprise"] = after_prazo_cliente.isoformat() if after_prazo_cliente else None
+
+        changes.append(payload)
 
     if not changes:
         st.info("Nenhuma alteração a salvar.")
@@ -693,6 +720,7 @@ if save_clicked:
             for err in errors:
                 st.code(err)
         if ok and not fail:
+            clear_deliverables_editor_state()
             refresh()
             st.rerun()
 
