@@ -61,30 +61,28 @@ DELIVERY_STATUS_OPTIONS = [
     "NAO_INICIADO",
     "EM_ELABORACAO",
     "EM_REVISAO",
-    "ENTREGUE",
-    "FATURADO",
+    "CONCLUIDO",
 ]
 STATUS_LABEL = {
-    "NAO_INICIADO":  "⚪ Não iniciado",
-    "EM_ELABORACAO": "🟡 Em elaboração",
-    "EM_REVISAO":    "🟠 Em revisão",
-    "ENTREGUE":      "🟢 Entregue",
-    "FATURADO":      "💰 Faturado",
+    "NAO_INICIADO": "Não iniciado",
+    "EM_ELABORACAO": "Em elaboração",
+    "EM_REVISAO": "Em revisão",
+    "CONCLUIDO": "Concluído",
 }
 LABEL_TO_STATUS = {v: k for k, v in STATUS_LABEL.items()}
 
-SITUACAO_OPTIONS = [
-    "🔴 Atrasado",
-    "⏰ Próximo",
-    "🟠 Em revisão",
-    "🟡 Em elaboração",
-    "⚪ Não iniciado",
-    "🟢 Entregue",
-    "💰 Faturado",
-]
-SITUACAO_PRIORITY = {s: i for i, s in enumerate(SITUACAO_OPTIONS)}
-
-PROXIMO_DIAS = 7  # janela usada para 'Próximo' na coluna Situação
+LEGACY_STATUS_TO_UI = {
+    "ENTREGUE": "CONCLUIDO",
+    "FATURADO": "CONCLUIDO",
+}
+UI_STATUS_TO_DB = {
+    "NAO_INICIADO": "NAO_INICIADO",
+    "EM_ELABORACAO": "EM_ELABORACAO",
+    "EM_REVISAO": "EM_REVISAO",
+    # Mantém compatibilidade com o check atual do banco.
+    "CONCLUIDO": "ENTREGUE",
+}
+STATUS_PRIORITY = {s: i for i, s in enumerate(DELIVERY_STATUS_OPTIONS)}
 
 
 # ==========================================================
@@ -137,6 +135,14 @@ def safe_text_list(series: pd.Series, default: str = "") -> list[str]:
     return out
 
 
+def to_ui_status(status: str | None) -> str:
+    s = (status or "NAO_INICIADO").strip().upper()
+    s = LEGACY_STATUS_TO_UI.get(s, s)
+    if s not in DELIVERY_STATUS_OPTIONS:
+        return "NAO_INICIADO"
+    return s
+
+
 def month_range(d: date) -> tuple[date, date]:
     first = d.replace(day=1)
     if first.month == 12:
@@ -176,43 +182,6 @@ def sb_paginate(table: str, *, select: str = "*", order_cols: list[tuple[str, bo
             break
         offset += page_size
     return out
-
-
-def situacao_for(status: str | None, end: date | None, needs_revision: bool, today_: date) -> str:
-    s = status or "NAO_INICIADO"
-    if s == "FATURADO":
-        return "💰 Faturado"
-    if s == "ENTREGUE":
-        return "🟢 Entregue"
-    if s == "EM_REVISAO" or needs_revision:
-        # Revisão domina, mas ainda mostra atraso se vencido
-        if end is not None and end < today_:
-            return "🔴 Atrasado"
-        return "🟠 Em revisão"
-    if end is not None and end < today_:
-        return "🔴 Atrasado"
-    if end is not None and 0 <= (end - today_).days <= PROXIMO_DIAS:
-        return "⏰ Próximo"
-    if s == "EM_ELABORACAO":
-        return "🟡 Em elaboração"
-    return "⚪ Não iniciado"
-
-
-def days_delta(end: date | None, today_: date) -> int | None:
-    if end is None:
-        return None
-    return (end - today_).days
-
-
-def format_days(d) -> str:
-    if d is None or (isinstance(d, float) and pd.isna(d)):
-        return ""
-    d = int(d)
-    if d < 0:
-        return f"⚠ −{-d}d (atraso)"
-    if d == 0:
-        return "Hoje"
-    return f"+{d}d"
 
 
 # ==========================================================
@@ -257,34 +226,8 @@ if df.empty:
 
 today = date.today()
 
-# Pré-computa Situação e dias restantes
-end_dates_all = [to_date(x) for x in df["end_date"].tolist()]
 status_all = safe_text_list(df["delivery_status"], "NAO_INICIADO")
-needs_rev_all = df["needs_revision"].fillna(False).astype(bool).tolist()
-df["__situacao"] = [situacao_for(s, e, r, today) for s, e, r in zip(status_all, end_dates_all, needs_rev_all)]
-df["__days"] = [days_delta(e, today) for e in end_dates_all]
-
-
-# ==========================================================
-# Painel: Próximos vencimentos
-# ==========================================================
-def _vencimento_panel():
-    horizons = [7, 15]
-    cols = st.columns(len(horizons) + 1)
-    overdue = df[df["__situacao"] == "🔴 Atrasado"]
-    cols[0].metric("🔴 Atrasados", len(overdue))
-    pending_mask = ~df["delivery_status"].isin(["ENTREGUE", "FATURADO"])
-    for i, h in enumerate(horizons, start=1):
-        m = df[
-            pending_mask
-            & df["__days"].notna()
-            & (df["__days"] >= 0)
-            & (df["__days"] <= h)
-        ]
-        cols[i].metric(f"⏰ Vencem em ≤ {h}d", len(m))
-
-
-_vencimento_panel()
+df["delivery_status_ui"] = [to_ui_status(s) for s in status_all]
 
 
 # ==========================================================
@@ -325,20 +268,15 @@ with fc2:
         format_func=lambda s: STATUS_LABEL.get(s, s),
     )
 with fc3:
-    only_pending = st.toggle("Apenas pendentes", value=False, help="Oculta ENTREGUE e FATURADO")
+    only_pending = st.toggle("Apenas não concluídos", value=False)
 
-fc4, fc5, fc6 = st.columns([2.0, 1.2, 1.2])
+fc4, _, fc6 = st.columns([2.0, 1.2, 1.2])
 with fc4:
     sel_period = st.selectbox(
         "Atalho (período pelo Prazo)",
         period_labels,
         index=default_period_idx,
         help="Filtra produtos cuja data de Prazo cai dentro do período.",
-    )
-with fc5:
-    include_overdue = st.toggle(
-        "Incluir atrasados", value=False,
-        help="Mostra atrasados mesmo fora do período (default desligado para não poluir o mês atual).",
     )
 with fc6:
     include_undated = st.toggle("Incluir sem prazo", value=False)
@@ -360,19 +298,17 @@ mask = pd.Series(True, index=df.index)
 if f_projects:
     mask &= df["project_code"].isin(f_projects)
 if f_status:
-    mask &= df["delivery_status"].isin(f_status)
+    mask &= df["delivery_status_ui"].isin(f_status)
 if only_pending:
-    mask &= ~df["delivery_status"].isin(["ENTREGUE", "FATURADO"])
+    mask &= df["delivery_status_ui"] != "CONCLUIDO"
 
 end_dates = pd.to_datetime(df["end_date"], errors="coerce").dt.date
 if p_start is not None and p_end is not None:
     in_window = end_dates.between(p_start, p_end)
-    extra = pd.Series(False, index=df.index)
-    if include_overdue:
-        extra = extra | (df["__situacao"] == "🔴 Atrasado")
     if include_undated:
-        extra = extra | end_dates.isna()
-    mask &= in_window | extra
+        mask &= in_window | end_dates.isna()
+    else:
+        mask &= in_window
 else:
     if not include_undated:
         mask &= end_dates.notna()
@@ -381,56 +317,18 @@ df_f = df.loc[mask].reset_index(drop=True)
 
 
 # ==========================================================
-# Métricas (alinhadas à Situação)
-# ==========================================================
-n_atrasado = int((df_f["__situacao"] == "🔴 Atrasado").sum())
-n_proximo  = int((df_f["__situacao"] == "⏰ Próximo").sum())
-n_revisao  = int((df_f["__situacao"] == "🟠 Em revisão").sum())
-n_entreg   = int((df_f["__situacao"] == "🟢 Entregue").sum())
-n_fat      = int((df_f["__situacao"] == "💰 Faturado").sum())
-
-m1, m2, m3, m4, m5, m6 = st.columns(6)
-m1.metric("Total exibido", len(df_f))
-m2.metric("🔴 Atrasados", n_atrasado)
-m3.metric("⏰ Próximos", n_proximo)
-m4.metric("🟠 Em revisão", n_revisao)
-m5.metric("🟢 Entregues", n_entreg)
-m6.metric("💰 Faturados", n_fat)
-
-# Indicador: atraso médio (entregas concluídas)
-delivered = df_f[df_f["delivery_status"].isin(["ENTREGUE", "FATURADO"])].copy()
-if not delivered.empty:
-    deliv_end = pd.to_datetime(delivered["end_date"], errors="coerce").dt.date
-    deliv_dt = pd.to_datetime(delivered["delivery_date"], errors="coerce").dt.date
-    diffs = []
-    for d_end, d_real in zip(deliv_end, deliv_dt):
-        if d_end is not None and d_real is not None:
-            diffs.append((d_real - d_end).days)
-    if diffs:
-        med = sum(diffs) / len(diffs)
-        sign = "+" if med >= 0 else ""
-        st.caption(
-            f"📊 **Atraso médio (entregues no filtro):** {sign}{med:.1f} dia(s) "
-            f"em {len(diffs)} entrega(s) com Prazo e Entrega preenchidos."
-        )
-
-st.divider()
-
-
-# ==========================================================
 # Tabela editável
 # ==========================================================
 st.subheader("Produtos")
-st.caption("Edite os campos de acompanhamento e clique em **Salvar alterações**.")
+st.caption("Edição rápida e inline para acompanhamento operacional.")
 
 SORT_OPTIONS = {
-    "Situação (Atrasado → Faturado)":  ("__sit_priority", True),
-    "Prazo (mais próximo primeiro)":   ("end_date", True),
-    "Prazo (mais distante primeiro)":  ("end_date", False),
-    "Projeto (A→Z)":                   ("project_code", True),
-    "Produto (A→Z)":                   ("product_name", True),
-    "Status":                          ("delivery_status", True),
-    "Atualizado recentemente":         ("tracking_updated_at", False),
+    "Prazo (mais próximo primeiro)": ("end_date", True),
+    "Prazo (mais distante primeiro)": ("end_date", False),
+    "Projeto (A→Z)": ("project_code", True),
+    "Produto (A→Z)": ("product_name", True),
+    "Status": ("__status_priority", True),
+    "Atualizado recentemente": ("tracking_updated_at", False),
 }
 
 tc1, tc2 = st.columns([2.5, 1.5])
@@ -443,13 +341,6 @@ with tc1:
 with tc2:
     sort_label = st.selectbox("Ordenar por", list(SORT_OPTIONS.keys()), index=0)
 
-rc1, _ = st.columns([1.5, 4])
-with rc1:
-    f_sit = st.multiselect("Situação", SITUACAO_OPTIONS, default=[])
-
-if f_sit:
-    df_f = df_f[df_f["__situacao"].isin(f_sit)].reset_index(drop=True)
-
 if search.strip():
     q = search.strip().lower()
     haystack = (
@@ -461,7 +352,9 @@ if search.strip():
     )
     df_f = df_f.loc[haystack.str.contains(q, na=False, regex=False)].reset_index(drop=True)
 
-df_f["__sit_priority"] = df_f["__situacao"].map(SITUACAO_PRIORITY).fillna(99).astype(int)
+df_f["__status_priority"] = (
+    df_f["delivery_status_ui"].map(STATUS_PRIORITY).fillna(99).astype(int)
+)
 sort_col, sort_asc = SORT_OPTIONS[sort_label]
 if sort_col in df_f.columns and not df_f.empty:
     df_f = df_f.sort_values(by=sort_col, ascending=sort_asc, na_position="last").reset_index(drop=True)
@@ -479,18 +372,16 @@ if df_f.empty:
 # ==========================================================
 def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame({
-        "Projeto":     safe_text_list(_df["project_code"]),
-        "Produto":     safe_text_list(_df["product_name"]),
-        "Situação":    _df["__situacao"].tolist(),
-        "Responsável": safe_text_list(_df["assignee_names"]) if "assignee_names" in _df.columns else [""] * len(_df),
-        "Status (DB)": safe_text_list(_df["delivery_status"]),
-        "Revisão?":    _df["needs_revision"].fillna(False).astype(bool).tolist(),
-        "Enviado?":    _df["sent_to_client"].fillna(False).astype(bool).tolist(),
-        "Entrega":     [to_date(x) for x in _df["delivery_date"].tolist()],
-        "Faturamento": [to_date(x) for x in _df["invoice_date"].tolist()],
-        "Prazo":       [to_date(x) for x in _df["end_date"].tolist()],
-        "Dias":        _df["__days"].tolist(),
-        "Obs":         safe_text_list(_df["tracking_notes"]),
+        "Projeto": safe_text_list(_df["project_code"]),
+        "Produto": safe_text_list(_df["product_name"]),
+        "Responsável": (
+            safe_text_list(_df["assignee_names"])
+            if "assignee_names" in _df.columns else [""] * len(_df)
+        ),
+        "Status": [STATUS_LABEL.get(s, s) for s in safe_text_list(_df["delivery_status_ui"])],
+        "Data de entrega ao cliente": [to_date(x) for x in _df["delivery_date"].tolist()],
+        "Prazo": [to_date(x) for x in _df["end_date"].tolist()],
+        "Obs": safe_text_list(_df["tracking_notes"]),
     })
 
 
@@ -521,24 +412,18 @@ except Exception:
 # Editor
 # ==========================================================
 ids = safe_text_list(df_f["task_id"])
-status_labels = [STATUS_LABEL.get(s, s) for s in safe_text_list(df_f["delivery_status"], "NAO_INICIADO")]
+status_labels = [STATUS_LABEL.get(s, s) for s in safe_text_list(df_f["delivery_status_ui"], "NAO_INICIADO")]
 resp_col = df_f["assignee_names"] if "assignee_names" in df_f.columns else pd.Series([""] * len(df_f))
-dias_strings = [format_days(d) for d in df_f["__days"].tolist()]
 
 df_show = pd.DataFrame(
     {
-        "Projeto":     safe_text_list(df_f["project_code"]),
-        "Produto":     safe_text_list(df_f["product_name"]),
-        "Situação":    df_f["__situacao"].tolist(),
+        "Projeto": safe_text_list(df_f["project_code"]),
+        "Produto": safe_text_list(df_f["product_name"]),
         "Responsável": safe_text_list(resp_col),
-        "Status":      status_labels,
-        "Revisão?":    df_f["needs_revision"].fillna(False).astype(bool).tolist(),
-        "Enviado?":    df_f["sent_to_client"].fillna(False).astype(bool).tolist(),
-        "Entrega":     [to_date(x) for x in df_f["delivery_date"].tolist()],
-        "Faturamento": [to_date(x) for x in df_f["invoice_date"].tolist()],
-        "Prazo":       [to_date(x) for x in df_f["end_date"].tolist()],
-        "Dias":        dias_strings,
-        "Obs":         safe_text_list(df_f["tracking_notes"]),
+        "Status": status_labels,
+        "Data de entrega ao cliente": [to_date(x) for x in df_f["delivery_date"].tolist()],
+        "Prazo": [to_date(x) for x in df_f["end_date"].tolist()],
+        "Obs": safe_text_list(df_f["tracking_notes"]),
     },
     index=ids,
 )
@@ -549,8 +434,8 @@ status_label_options = [STATUS_LABEL[s] for s in DELIVERY_STATUS_OPTIONS]
 # Sem isso, o editor cacheia as edições por índice e mostra dados defasados.
 _editor_signature = hash(
     (
-        tuple(f_projects), tuple(f_status), tuple(f_sit),
-        only_pending, include_overdue, include_undated,
+        tuple(f_projects), tuple(f_status),
+        only_pending, include_undated,
         sel_period, sort_label, search.strip(),
         tuple(ids),
     )
@@ -562,38 +447,19 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="fixed",
     column_config={
-        "Projeto":     st.column_config.TextColumn(disabled=True, width="small"),
-        "Produto":     st.column_config.TextColumn(disabled=True, width="large"),
-        "Situação":    st.column_config.TextColumn(
-            disabled=True, width="small",
-            help="Calculada automaticamente a partir de Status, Prazo, Revisão e datas.",
-        ),
+        "Projeto": st.column_config.TextColumn(disabled=True, width="small"),
+        "Produto": st.column_config.TextColumn(disabled=True, width="large"),
         "Responsável": st.column_config.TextColumn(disabled=True, width="medium"),
-        "Status":      st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
-        "Revisão?":    st.column_config.CheckboxColumn(width="small"),
-        "Enviado?":    st.column_config.CheckboxColumn(width="small", help="Marcar preenche Entrega com hoje se vazia"),
-        "Entrega":     st.column_config.DateColumn(
-            format="DD/MM/YYYY", width="small",
-            help="Edite manualmente para corrigir a data real de entrega.",
+        "Status": st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
+        "Data de entrega ao cliente": st.column_config.DateColumn(
+            format="DD/MM/YYYY",
+            width="small",
+            help="Data de entrega efetiva ao cliente.",
         ),
-        "Faturamento": st.column_config.DateColumn(
-            format="DD/MM/YYYY", width="small",
-            help="Edite manualmente para corrigir a data real do faturamento.",
-        ),
-        "Prazo":       st.column_config.DateColumn(format="DD/MM/YYYY", disabled=True, width="small"),
-        "Dias":        st.column_config.TextColumn(
-            disabled=True, width="small",
-            help="Dias restantes (+) ou de atraso (−) em relação ao Prazo.",
-        ),
-        "Obs":         st.column_config.TextColumn(width="large"),
+        "Prazo": st.column_config.DateColumn(format="DD/MM/YYYY", disabled=True, width="small"),
+        "Obs": st.column_config.TextColumn(width="large"),
     },
     key=f"deliverables_editor::{_editor_signature}",
-)
-
-st.caption(
-    "💡 **Entrega** e **Faturamento** são editáveis. Auto-datação preenche apenas "
-    "se a célula estiver vazia (Enviado? ou Status=Entregue → Entrega; "
-    "Status=Faturado → Faturamento). **Situação** e **Dias** são recalculadas após salvar."
 )
 
 bc1, bc2, _ = st.columns([1, 1, 4])
@@ -607,64 +473,57 @@ if reload_clicked:
 if save_clicked:
     changes: list[dict] = []
     warnings: list[str] = []
+    rows_by_task_id = {str(r["task_id"]): r for _, r in df_f.iterrows()}
+
     for task_id in ids:
         before = df_show.loc[task_id]
         after = edited.loc[task_id]
 
-        before_status = LABEL_TO_STATUS.get(before["Status"], "NAO_INICIADO")
-        after_status = LABEL_TO_STATUS.get(after["Status"], "NAO_INICIADO")
+        before_status_ui = LABEL_TO_STATUS.get(before["Status"], "NAO_INICIADO")
+        after_status_ui = LABEL_TO_STATUS.get(after["Status"], "NAO_INICIADO")
 
-        after_sent = bool(after["Enviado?"])
-        before_sent = bool(before["Enviado?"])
-        after_rev = bool(after["Revisão?"])
-        before_rev = bool(before["Revisão?"])
-
-        after_entrega = to_date(after["Entrega"])
-        after_fat = to_date(after["Faturamento"])
-        before_entrega = to_date(before["Entrega"])
-        before_fat = to_date(before["Faturamento"])
-
-        # Auto-datação (somente quando célula vazia)
-        if after_entrega is None and (
-            (after_status == "ENTREGUE" and before_status != "ENTREGUE")
-            or (after_sent and not before_sent)
-        ):
-            after_entrega = today
-        if after_fat is None and after_status == "FATURADO" and before_status != "FATURADO":
-            after_fat = today
+        after_entrega = to_date(after["Data de entrega ao cliente"])
+        before_entrega = to_date(before["Data de entrega ao cliente"])
+        before_obs = norm_text(before["Obs"])
+        after_obs = norm_text(after["Obs"])
 
         diff = (
-            before_status != after_status
-            or before_rev != after_rev
-            or before_sent != after_sent
+            before_status_ui != after_status_ui
             or before_entrega != after_entrega
-            or before_fat != after_fat
-            or norm_text(before["Obs"]) != norm_text(after["Obs"])
+            or before_obs != after_obs
         )
         if not diff:
             continue
 
-        label = f"{after.get('Projeto','?')} — {after.get('Produto','?')}"
-        # Validações não-bloqueantes
-        if after_status == "FATURADO" and after_entrega is None:
-            warnings.append(f"{label}: marcado como **Faturado** sem data de **Entrega** preenchida.")
-        if after_rev and after_status in ("ENTREGUE", "FATURADO"):
-            warnings.append(
-                f"{label}: **Revisão?** marcada mas Status é **{STATUS_LABEL[after_status]}** "
-                "— confira se a revisão já foi resolvida."
-            )
-        if after_status == "ENTREGUE" and after_entrega is None:
-            warnings.append(f"{label}: status **Entregue** sem data de **Entrega** preenchida.")
+        row = rows_by_task_id.get(str(task_id))
+        if row is None:
+            continue
+
+        current_db_status = str(row.get("delivery_status") or "NAO_INICIADO").strip().upper()
+        current_ui_status = to_ui_status(current_db_status)
+        if after_status_ui == current_ui_status:
+            # Se o status visual não mudou, preserva exatamente o valor atual no banco.
+            after_status_db = current_db_status
+        else:
+            after_status_db = UI_STATUS_TO_DB.get(after_status_ui, "NAO_INICIADO")
+
+        keep_revision = bool(row.get("needs_revision", False))
+        keep_sent = bool(row.get("sent_to_client", False))
+        keep_invoice = to_date(row.get("invoice_date"))
+
+        if after_status_ui == "CONCLUIDO" and after_entrega is None:
+            label = f"{after.get('Projeto','?')} — {after.get('Produto','?')}"
+            warnings.append(f"{label}: status **Concluído** sem data de entrega ao cliente.")
 
         changes.append(
             {
                 "task_id": task_id,
-                "delivery_status": after_status,
-                "needs_revision": after_rev,
-                "sent_to_client": after_sent,
+                "delivery_status": after_status_db,
+                "needs_revision": keep_revision,
+                "sent_to_client": keep_sent,
                 "delivery_date": after_entrega.isoformat() if after_entrega else None,
-                "invoice_date": after_fat.isoformat() if after_fat else None,
-                "notes": norm_text(after["Obs"]),
+                "invoice_date": keep_invoice.isoformat() if keep_invoice else None,
+                "notes": after_obs,
             }
         )
 
@@ -706,31 +565,6 @@ if save_clicked:
 
 
 # ==========================================================
-# Visão colorida (read-only)
-# ==========================================================
-with st.expander("🎨 Visão colorida (somente leitura)", expanded=False):
-    def _row_style(row):
-        sit = row.get("Situação", "")
-        color = {
-            "🔴 Atrasado":     "#fee2e2",
-            "⏰ Próximo":      "#ffe4cc",
-            "🟠 Em revisão":   "#ffedd5",
-            "🟡 Em elaboração":"#fef3c7",
-            "⚪ Não iniciado": "#f3f4f6",
-            "🟢 Entregue":     "#dcfce7",
-            "💰 Faturado":     "#cffafe",
-        }.get(sit, "")
-        return [f"background-color: {color}" if color else ""] * len(row)
-
-    view_df = export_df.copy()
-    try:
-        styled = view_df.style.apply(_row_style, axis=1)
-        st.dataframe(styled, use_container_width=True, hide_index=True)
-    except Exception:
-        st.dataframe(view_df, use_container_width=True, hide_index=True)
-
-
-# ==========================================================
 # Timeline
 # ==========================================================
 st.divider()
@@ -758,18 +592,18 @@ else:
                     ts = str(ts)
                 ev = row["event_type"]
                 if ev == "STATUS_CHANGE":
-                    return f"**{ts}** — Status: `{row['from_value']}` → `{row['to_value']}`"
-                if ev == "REVISION_FLAG":
-                    return f"**{ts}** — Marcado para revisão"
-                if ev == "SENT_TO_CLIENT":
-                    return f"**{ts}** — Enviado ao cliente"
+                    from_status = STATUS_LABEL.get(to_ui_status(row.get("from_value")), row.get("from_value"))
+                    to_status = STATUS_LABEL.get(to_ui_status(row.get("to_value")), row.get("to_value"))
+                    return f"**{ts}** — Status: `{from_status}` → `{to_status}`"
                 if ev == "DELIVERED":
-                    return f"**{ts}** — Entregue em `{row['to_value']}`"
-                if ev == "INVOICED":
-                    return f"**{ts}** — Faturado em `{row['to_value']}`"
+                    return f"**{ts}** — Entrega ao cliente em `{row['to_value']}`"
                 if ev == "CREATED":
-                    return f"**{ts}** — Acompanhamento iniciado (`{row['to_value']}`)"
+                    created_status = STATUS_LABEL.get(to_ui_status(row.get("to_value")), row.get("to_value"))
+                    return f"**{ts}** — Acompanhamento iniciado (`{created_status}`)"
                 return f"**{ts}** — {ev}"
 
+            hidden_events = {"REVISION_FLAG", "SENT_TO_CLIENT", "INVOICED"}
             for _, ev in events.iterrows():
+                if str(ev.get("event_type") or "").upper() in hidden_events:
+                    continue
                 st.markdown("• " + _fmt_event(ev))
