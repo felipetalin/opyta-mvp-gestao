@@ -84,6 +84,11 @@ UI_STATUS_TO_DB = {
 }
 STATUS_PRIORITY = {s: i for i, s in enumerate(DELIVERY_STATUS_OPTIONS)}
 
+DELIVERY_DATE_STATUS = {
+    "ENTREGUE": "🟢 Entregue",
+    "PENDENTE": "🟡 Pendente",
+}
+
 
 # ==========================================================
 # Helpers
@@ -143,6 +148,10 @@ def to_ui_status(status: str | None) -> str:
     return s
 
 
+def delivery_date_status(delivery_date) -> str:
+    return DELIVERY_DATE_STATUS["ENTREGUE"] if to_date(delivery_date) else DELIVERY_DATE_STATUS["PENDENTE"]
+
+
 def month_range(d: date) -> tuple[date, date]:
     first = d.replace(day=1)
     if first.month == 12:
@@ -182,6 +191,10 @@ def sb_paginate(table: str, *, select: str = "*", order_cols: list[tuple[str, bo
             break
         offset += page_size
     return out
+
+
+def rpc_delete_task(task_id: str) -> None:
+    sb.rpc("rpc_delete_task", {"p_task_id": task_id}).execute()
 
 
 # ==========================================================
@@ -274,7 +287,7 @@ with fc4:
 chosen = next(p for p in period_presets if p[0] == sel_period)
 if chosen[0] != "(manual)":
     p_start, p_end = chosen[1], chosen[2]
-    st.caption(f"Período (Prazo): **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
+    st.caption(f"Período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 else:
     period = st.date_input("Período (manual)", value=(cur_start, cur_end), format="DD/MM/YYYY")
     if isinstance(period, tuple) and len(period) == 2:
@@ -311,11 +324,11 @@ st.subheader("Produtos")
 st.caption("Edição rápida e inline para acompanhamento operacional.")
 
 SORT_OPTIONS = {
-    "Prazo (mais próximo primeiro)": ("end_date", True),
-    "Prazo (mais distante primeiro)": ("end_date", False),
+    "Data de entrega ao cliente (mais recente primeiro)": ("delivery_date", False),
+    "Data de entrega ao cliente (mais antiga primeiro)": ("delivery_date", True),
     "Projeto (A→Z)": ("project_code", True),
     "Produto (A→Z)": ("product_name", True),
-    "Status": ("__status_priority", True),
+    "Status do produto": ("__status_priority", True),
     "Atualizado recentemente": ("tracking_updated_at", False),
 }
 
@@ -366,9 +379,9 @@ def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
             safe_text_list(_df["assignee_names"])
             if "assignee_names" in _df.columns else [""] * len(_df)
         ),
-        "Status": [STATUS_LABEL.get(s, s) for s in safe_text_list(_df["delivery_status_ui"])],
+        "Status do produto": [STATUS_LABEL.get(s, s) for s in safe_text_list(_df["delivery_status_ui"])],
+        "Status da entrega": [delivery_date_status(x) for x in _df["delivery_date"].tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in _df["delivery_date"].tolist()],
-        "Prazo": [to_date(x) for x in _df["end_date"].tolist()],
         "Obs": safe_text_list(_df["tracking_notes"]),
     })
 
@@ -405,12 +418,13 @@ resp_col = df_f["assignee_names"] if "assignee_names" in df_f.columns else pd.Se
 
 df_show = pd.DataFrame(
     {
+        "Excluir?": [False] * len(df_f),
         "Projeto": safe_text_list(df_f["project_code"]),
         "Produto": safe_text_list(df_f["product_name"]),
         "Responsável": safe_text_list(resp_col),
-        "Status": status_labels,
+        "Status do produto": status_labels,
+        "Status da entrega": [delivery_date_status(x) for x in df_f["delivery_date"].tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in df_f["delivery_date"].tolist()],
-        "Prazo": [to_date(x) for x in df_f["end_date"].tolist()],
         "Obs": safe_text_list(df_f["tracking_notes"]),
     },
     index=ids,
@@ -434,20 +448,47 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="fixed",
     column_config={
+        "Excluir?": st.column_config.CheckboxColumn("Excluir?", width="small", help="Marque para excluir."),
         "Projeto": st.column_config.TextColumn(disabled=True, width="small"),
         "Produto": st.column_config.TextColumn(disabled=True, width="large"),
         "Responsável": st.column_config.TextColumn(disabled=True, width="medium"),
-        "Status": st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
+        "Status do produto": st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
+        "Status da entrega": st.column_config.TextColumn(disabled=True, width="small"),
         "Data de entrega ao cliente": st.column_config.DateColumn(
             format="DD/MM/YYYY",
             width="small",
             help="Data de entrega efetiva ao cliente.",
         ),
-        "Prazo": st.column_config.DateColumn(format="DD/MM/YYYY", disabled=True, width="small"),
         "Obs": st.column_config.TextColumn(width="large"),
     },
     key=f"deliverables_editor::{_editor_signature}",
 )
+
+to_delete_ids = edited.index[edited["Excluir?"] == True].astype(str).tolist()  # noqa: E712
+
+if to_delete_ids:
+    with st.container(border=True):
+        st.error(f"Exclusão: você marcou **{len(to_delete_ids)}** produto(s).")
+        titles = edited.loc[to_delete_ids, "Produto"].astype(str).tolist()
+        st.write("**Produtos marcados:**")
+        st.write("\n".join([f"- {t}" for t in titles if t and t != "None"]))
+
+        confirm_delete = st.checkbox("Confirmo a exclusão definitiva dos produtos marcados", value=False)
+
+        colx1, colx2 = st.columns([1, 2])
+        delete_now = colx1.button("Excluir marcados agora", type="primary", disabled=not confirm_delete)
+        colx2.caption("Dica: desmarque o checkbox na tabela para cancelar a exclusão.")
+
+        if delete_now:
+            try:
+                for tid in to_delete_ids:
+                    rpc_delete_task(tid)
+                st.success(f"Excluídos: {len(to_delete_ids)}")
+                refresh()
+                st.rerun()
+            except Exception as e:
+                st.error("Erro ao excluir:")
+                st.code(_api_error_message(e))
 
 bc1, bc2, _ = st.columns([1, 1, 4])
 save_clicked = bc1.button("Salvar alterações", type="primary")
@@ -466,8 +507,11 @@ if save_clicked:
         before = df_show.loc[task_id]
         after = edited.loc[task_id]
 
-        before_status_ui = LABEL_TO_STATUS.get(before["Status"], "NAO_INICIADO")
-        after_status_ui = LABEL_TO_STATUS.get(after["Status"], "NAO_INICIADO")
+        if bool(after["Excluir?"]):
+            continue
+
+        before_status_ui = LABEL_TO_STATUS.get(before["Status do produto"], "NAO_INICIADO")
+        after_status_ui = LABEL_TO_STATUS.get(after["Status do produto"], "NAO_INICIADO")
 
         after_entrega = to_date(after["Data de entrega ao cliente"])
         before_entrega = to_date(before["Data de entrega ao cliente"])
