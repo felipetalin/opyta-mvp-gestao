@@ -337,6 +337,10 @@ st.subheader("Produtos")
 st.caption("Edição rápida e inline para acompanhamento operacional.")
 
 SORT_OPTIONS = {
+    "Prazo de entrega ao cliente (mais próximo primeiro)": ("client_due_date", True),
+    "Prazo de entrega ao cliente (mais distante primeiro)": ("client_due_date", False),
+    "Prazo de entrega interna (mais próximo primeiro)": ("end_date", True),
+    "Prazo de entrega interna (mais distante primeiro)": ("end_date", False),
     "Data de entrega ao cliente (mais recente primeiro)": ("delivery_date", False),
     "Data de entrega ao cliente (mais antiga primeiro)": ("delivery_date", True),
     "Projeto (A→Z)": ("project_code", True),
@@ -393,11 +397,15 @@ def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
             if "assignee_names" in _df.columns else [""] * len(_df)
         ),
         "Status do produto": [STATUS_LABEL.get(s, s) for s in safe_text_list(_df["delivery_status_ui"])],
-        "Prazo de entrega ao cliente": [to_date(x) for x in _df["end_date"].tolist()],
+        "Prazo de entrega interna": [to_date(x) for x in _df["end_date"].tolist()],
+        "Prazo de entrega ao cliente": [to_date(x) for x in _df.get("client_due_date", pd.Series([None] * len(_df))).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in _df["delivery_date"].tolist()],
         "Status da entrega": [
             delivery_status_for(prazo, entrega, today)
-            for prazo, entrega in zip(_df["end_date"].tolist(), _df["delivery_date"].tolist())
+            for prazo, entrega in zip(
+                _df.get("client_due_date", pd.Series([None] * len(_df))).tolist(),
+                _df["delivery_date"].tolist(),
+            )
         ],
         "Obs": safe_text_list(_df["tracking_notes"]),
     })
@@ -439,11 +447,15 @@ df_show = pd.DataFrame(
         "Produto": safe_text_list(df_f["product_name"]),
         "Responsável": safe_text_list(resp_col),
         "Status do produto": status_labels,
-        "Prazo de entrega ao cliente": [to_date(x) for x in df_f["end_date"].tolist()],
+        "Prazo de entrega interna": [to_date(x) for x in df_f["end_date"].tolist()],
+        "Prazo de entrega ao cliente": [to_date(x) for x in df_f.get("client_due_date", pd.Series([None] * len(df_f))).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in df_f["delivery_date"].tolist()],
         "Status da entrega": [
             delivery_status_for(prazo, entrega, today)
-            for prazo, entrega in zip(df_f["end_date"].tolist(), df_f["delivery_date"].tolist())
+            for prazo, entrega in zip(
+                df_f.get("client_due_date", pd.Series([None] * len(df_f))).tolist(),
+                df_f["delivery_date"].tolist(),
+            )
         ],
         "Obs": safe_text_list(df_f["tracking_notes"]),
         "Excluir?": [False] * len(df_f),
@@ -473,10 +485,15 @@ edited = st.data_editor(
         "Produto": st.column_config.TextColumn(disabled=True, width="large"),
         "Responsável": st.column_config.TextColumn(disabled=True, width="medium"),
         "Status do produto": st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
-        "Prazo de entrega ao cliente": st.column_config.DateColumn(
+        "Prazo de entrega interna": st.column_config.DateColumn(
             format="DD/MM/YYYY",
             disabled=True,
             width="small",
+        ),
+        "Prazo de entrega ao cliente": st.column_config.DateColumn(
+            format="DD/MM/YYYY",
+            width="small",
+            help="Prazo combinado com o cliente (editável aqui).",
         ),
         "Data de entrega ao cliente": st.column_config.DateColumn(
             format="DD/MM/YYYY",
@@ -541,12 +558,15 @@ if save_clicked:
 
         after_entrega = to_date(after["Data de entrega ao cliente"])
         before_entrega = to_date(before["Data de entrega ao cliente"])
+        after_prazo_cliente = to_date(after["Prazo de entrega ao cliente"])
+        before_prazo_cliente = to_date(before["Prazo de entrega ao cliente"])
         before_obs = norm_text(before["Obs"])
         after_obs = norm_text(after["Obs"])
 
         diff = (
             before_status_ui != after_status_ui
             or before_entrega != after_entrega
+            or before_prazo_cliente != after_prazo_cliente
             or before_obs != after_obs
         )
         if not diff:
@@ -578,6 +598,7 @@ if save_clicked:
                 "delivery_status": after_status_db,
                 "needs_revision": keep_revision,
                 "sent_to_client": keep_sent,
+                "client_due_date": after_prazo_cliente.isoformat() if after_prazo_cliente else None,
                 "delivery_date": after_entrega.isoformat() if after_entrega else None,
                 "invoice_date": keep_invoice.isoformat() if keep_invoice else None,
                 "notes": after_obs,
