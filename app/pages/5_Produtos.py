@@ -85,8 +85,11 @@ UI_STATUS_TO_DB = {
 STATUS_PRIORITY = {s: i for i, s in enumerate(DELIVERY_STATUS_OPTIONS)}
 
 DELIVERY_DATE_STATUS = {
-    "ENTREGUE": "🟢 Entregue",
+    "SEM_PRAZO": "⚪ Sem prazo",
     "PENDENTE": "🟡 Pendente",
+    "ATRASADA": "🔴 Atrasada",
+    "ENTREGUE_NO_PRAZO": "🟢 Entregue no prazo",
+    "ENTREGUE_COM_ATRASO": "🔴 Entregue com atraso",
 }
 
 
@@ -148,8 +151,18 @@ def to_ui_status(status: str | None) -> str:
     return s
 
 
-def delivery_date_status(delivery_date) -> str:
-    return DELIVERY_DATE_STATUS["ENTREGUE"] if to_date(delivery_date) else DELIVERY_DATE_STATUS["PENDENTE"]
+def delivery_status_for(deadline, delivery_date, today_: date) -> str:
+    prazo = to_date(deadline)
+    entrega = to_date(delivery_date)
+    if entrega is None:
+        if prazo is None:
+            return DELIVERY_DATE_STATUS["SEM_PRAZO"]
+        if prazo < today_:
+            return DELIVERY_DATE_STATUS["ATRASADA"]
+        return DELIVERY_DATE_STATUS["PENDENTE"]
+    if prazo is None or entrega <= prazo:
+        return DELIVERY_DATE_STATUS["ENTREGUE_NO_PRAZO"]
+    return DELIVERY_DATE_STATUS["ENTREGUE_COM_ATRASO"]
 
 
 def month_range(d: date) -> tuple[date, date]:
@@ -380,8 +393,12 @@ def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
             if "assignee_names" in _df.columns else [""] * len(_df)
         ),
         "Status do produto": [STATUS_LABEL.get(s, s) for s in safe_text_list(_df["delivery_status_ui"])],
-        "Status da entrega": [delivery_date_status(x) for x in _df["delivery_date"].tolist()],
+        "Prazo de entrega ao cliente": [to_date(x) for x in _df["end_date"].tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in _df["delivery_date"].tolist()],
+        "Status da entrega": [
+            delivery_status_for(prazo, entrega, today)
+            for prazo, entrega in zip(_df["end_date"].tolist(), _df["delivery_date"].tolist())
+        ],
         "Obs": safe_text_list(_df["tracking_notes"]),
     })
 
@@ -418,14 +435,18 @@ resp_col = df_f["assignee_names"] if "assignee_names" in df_f.columns else pd.Se
 
 df_show = pd.DataFrame(
     {
-        "Excluir?": [False] * len(df_f),
         "Projeto": safe_text_list(df_f["project_code"]),
         "Produto": safe_text_list(df_f["product_name"]),
         "Responsável": safe_text_list(resp_col),
         "Status do produto": status_labels,
-        "Status da entrega": [delivery_date_status(x) for x in df_f["delivery_date"].tolist()],
+        "Prazo de entrega ao cliente": [to_date(x) for x in df_f["end_date"].tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in df_f["delivery_date"].tolist()],
+        "Status da entrega": [
+            delivery_status_for(prazo, entrega, today)
+            for prazo, entrega in zip(df_f["end_date"].tolist(), df_f["delivery_date"].tolist())
+        ],
         "Obs": safe_text_list(df_f["tracking_notes"]),
+        "Excluir?": [False] * len(df_f),
     },
     index=ids,
 )
@@ -448,18 +469,23 @@ edited = st.data_editor(
     hide_index=True,
     num_rows="fixed",
     column_config={
-        "Excluir?": st.column_config.CheckboxColumn("Excluir?", width="small", help="Marque para excluir."),
         "Projeto": st.column_config.TextColumn(disabled=True, width="small"),
         "Produto": st.column_config.TextColumn(disabled=True, width="large"),
         "Responsável": st.column_config.TextColumn(disabled=True, width="medium"),
         "Status do produto": st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
-        "Status da entrega": st.column_config.TextColumn(disabled=True, width="small"),
+        "Prazo de entrega ao cliente": st.column_config.DateColumn(
+            format="DD/MM/YYYY",
+            disabled=True,
+            width="small",
+        ),
         "Data de entrega ao cliente": st.column_config.DateColumn(
             format="DD/MM/YYYY",
             width="small",
             help="Data de entrega efetiva ao cliente.",
         ),
+        "Status da entrega": st.column_config.TextColumn(disabled=True, width="medium"),
         "Obs": st.column_config.TextColumn(width="large"),
+        "Excluir?": st.column_config.CheckboxColumn("Excluir?", width="small", help="Marque para excluir."),
     },
     key=f"deliverables_editor::{_editor_signature}",
 )
