@@ -118,7 +118,12 @@ def to_date(x):
     if x is None or (isinstance(x, float) and pd.isna(x)):
         return None
     try:
-        return pd.to_datetime(x).date()
+        # Streamlit data_editor pode devolver datas como string no formato pt-BR (DD/MM/YYYY).
+        # pd.to_datetime sem dayfirst pode falhar e "sumir" com o prazo/entrega, quebrando o Status da entrega.
+        if isinstance(x, str) and "/" in x:
+            return pd.to_datetime(x, dayfirst=True, errors="coerce").date() if not pd.isna(pd.to_datetime(x, dayfirst=True, errors="coerce")) else None
+        dt = pd.to_datetime(x, errors="coerce")
+        return dt.date() if not pd.isna(dt) else None
     except Exception:
         return None
 
