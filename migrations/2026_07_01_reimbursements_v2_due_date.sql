@@ -118,7 +118,9 @@ begin
   return new;
 end $$;
 
-create or replace view public.v_reimbursements as
+drop view if exists public.v_reimbursements;
+
+create view public.v_reimbursements as
 select
   r.id,
   r.expense_date,
