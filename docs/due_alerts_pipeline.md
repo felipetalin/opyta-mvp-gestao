@@ -27,6 +27,24 @@ do vencimento, reaproveitando o Supabase e a automacao via GitHub Actions.
 - Workflow: `.github/workflows/due-alerts.yml`
 - Migration: `migrations/2026_07_01_due_notifications.sql`
 
+## Registro em 2026-07-01
+
+- A integracao existente do Gantt e um sync com Google Calendar, nao um envio de
+  e-mail transacional. Ela continua sendo util para agenda, mas nao substitui o
+  pipeline de avisos.
+- A decisao tomada foi criar um job separado de notificacoes, mantendo o Gantt,
+  Laboratorio, Produtos e Reembolsos como fontes independentes.
+- O provedor escolhido para a primeira versao de envio real foi Gmail API com
+  service account/delegacao, usando o escopo `https://www.googleapis.com/auth/gmail.send`.
+- O workflow `Due Alerts` foi publicado em modo seguro: a agenda diaria roda em
+  dry-run ate a virada final da chave.
+- Dry-run local em `2026-07-01`: o job encontrou 27 vencimentos dentro das regras,
+  mas todos ficaram sem destinatario porque `people.email` ainda estava vazio.
+- Teste controlado com `NOTIFICATION_FALLBACK_RECIPIENT` e fonte `reembolsos`
+  montou corretamente um e-mail com 3 avisos: 2 atrasados e 1 vencendo em 1 dia.
+- A tabela `due_notification_log` ainda precisa ser criada no Supabase antes do
+  envio real; em dry-run a ausencia dessa tabela gera apenas aviso tecnico.
+
 ## Checklist para ativar
 
 1. Aplicar `migrations/2026_07_01_due_notifications.sql` no SQL Editor do Supabase.
