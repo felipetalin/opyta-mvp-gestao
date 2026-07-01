@@ -1,0 +1,73 @@
+name: Due Alerts
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rodar sem enviar e-mail?"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
+  schedule:
+    # 08:00 BRT em dias uteis. Mantido em dry-run ate virar a chave no env abaixo.
+    - cron: "0 11 * * 1-5"
+
+concurrency:
+  group: due-alerts
+  cancel-in-progress: false
+
+jobs:
+  due-alerts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NOTIFICATION_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
+      NOTIFICATION_SOURCES: "gantt,laboratorio,produtos,reembolsos"
+      NOTIFICATION_WINDOWS_DAYS: "0,1,3,7"
+      NOTIFICATION_OVERDUE_LOOKBACK_DAYS: "30"
+      NOTIFICATION_FROM_EMAIL: "felipetalin@opyta.com.br"
+      FALLBACK_OWNER_EMAIL: "felipetalin@opyta.com.br"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-sync.txt
+
+      - name: Write Google Service Account JSON
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run == 'false' }}
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          mkdir -p secrets_gcal
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          content = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+          output = Path("secrets_gcal/service-account-gcal.json")
+          output.write_text(content, encoding="utf-8")
+          json.loads(output.read_text(encoding="utf-8"))
+          print("Google service account JSON written and validated.")
+          PY
+
+      - name: Run due alert job
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ./secrets_gcal/service-account-gcal.json
+          GOOGLE_SCOPES: https://www.googleapis.com/auth/gmail.send
+        run: |
+          python scripts/notifications/send_due_alerts.py
