@@ -449,56 +449,68 @@ prev_start, _ = month_range(prev_first)
 _, next2_end = month_range(next2_first)
 
 period_presets: list[tuple[str, date | None, date | None]] = [
+    ("Tudo", None, None),
     (f"Mês atual ({month_label(cur_first)})", cur_start, cur_end),
     (f"Próximo mês ({month_label(next_first)})", next_start, next_end),
     (f"2 meses ({month_label(cur_first)} + {month_label(next_first)})", cur_start, next_end),
     (f"3 meses ({month_label(cur_first)} + {month_label(next2_first)})", cur_start, next2_end),
     (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
     ("(manual)", None, None),
-    ("Tudo", None, None),
 ]
 period_labels = [p[0] for p in period_presets]
 
-fc1, fc2, fc3 = st.columns([1.6, 1.6, 1.2])
-with fc1:
-    f_projects = st.multiselect("Projeto", projects_all, default=[])
-with fc2:
-    f_status_ui = st.multiselect(
-        "Status",
-        LAB_STATUS_UI,
-        default=[],
-        format_func=lambda s: STATUS_LABEL_UI.get(s, s),
-    )
-with fc3:
-    only_pending = st.toggle(
-        "Apenas pendentes", value=False,
-        help="Oculta entregas concluídas.",
-    )
+st.caption("Exibindo todos os registros por padrão. Use os filtros opcionais apenas para recortes pontuais.")
 
-fc4, fc5, fc6 = st.columns([2.0, 1.2, 1.2])
-with fc4:
-    sel_period = st.selectbox(
-        "Atalho (período pela Previsão)", period_labels, index=3,
-        help="Padrão = 3 meses (acomoda SLAs típicos de 30–60 dias).",
-    )
-with fc5:
-    include_overdue = st.toggle("Incluir atrasadas", value=True,
-                                help="Mostra atrasadas mesmo fora do período.")
-with fc6:
-    include_undated = st.toggle("Incluir sem previsão", value=False)
+with st.expander("Filtros opcionais de acompanhamento", expanded=False):
+    fc1, fc2, fc3 = st.columns([1.6, 1.6, 1.2])
+    with fc1:
+        f_projects = st.multiselect("Projeto", projects_all, default=[], key="lab_follow_projects_v2")
+    with fc2:
+        f_status_ui = st.multiselect(
+            "Status",
+            LAB_STATUS_UI,
+            default=[],
+            format_func=lambda s: STATUS_LABEL_UI.get(s, s),
+            key="lab_follow_status_v2",
+        )
+    with fc3:
+        only_pending = st.toggle(
+            "Apenas pendentes", value=False,
+            help="Oculta entregas concluídas.",
+            key="lab_follow_only_pending_v2",
+        )
 
-chosen = next(p for p in period_presets if p[0] == sel_period)
-if chosen[0] == "(manual)":
-    period = st.date_input("Período manual (Previsão)", value=(cur_start, cur_end), format="DD/MM/YYYY")
-    if isinstance(period, tuple) and len(period) == 2:
-        p_start, p_end = period
+    fc4, fc5, fc6 = st.columns([2.0, 1.2, 1.2])
+    with fc4:
+        sel_period = st.selectbox(
+            "Atalho (período pela Previsão)",
+            period_labels,
+            index=0,
+            key="lab_period_preset_v2",
+            help="Padrão = Tudo, sem restringir pela data de previsão.",
+        )
+    with fc5:
+        include_overdue = st.toggle(
+            "Incluir atrasadas",
+            value=True,
+            help="Mostra atrasadas mesmo fora do período.",
+            key="lab_include_overdue_v2",
+        )
+    with fc6:
+        include_undated = st.toggle("Incluir sem previsão", value=True, key="lab_include_undated_v2")
+
+    chosen = next(p for p in period_presets if p[0] == sel_period)
+    if chosen[0] == "(manual)":
+        period = st.date_input("Período manual (Previsão)", value=(cur_start, cur_end), format="DD/MM/YYYY")
+        if isinstance(period, tuple) and len(period) == 2:
+            p_start, p_end = period
+        else:
+            p_start, p_end = cur_start, cur_end
+    elif chosen[0] == "Tudo":
+        p_start, p_end = None, None
     else:
-        p_start, p_end = cur_start, cur_end
-elif chosen[0] == "Tudo":
-    p_start, p_end = None, None
-else:
-    p_start, p_end = chosen[1], chosen[2]
-    st.caption(f"Período (Previsão): **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
+        p_start, p_end = chosen[1], chosen[2]
+        st.caption(f"Período (Previsão): **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
 
 # Máscaras
 mask = pd.Series(True, index=df.index)
@@ -520,7 +532,7 @@ if p_start is not None and p_end is not None:
         extra = extra | expected.isna()
     mask &= in_window | extra
 else:
-    if not include_undated:
+    if chosen[0] != "Tudo" and not include_undated:
         mask &= expected.notna()
 
 df_f = df.loc[mask].reset_index(drop=True)
@@ -559,25 +571,27 @@ SORT_OPTIONS = {
     "Atualizado recentemente":           ("updated_at", False),
 }
 
-tc1, tc2 = st.columns([2.5, 1.5])
-with tc1:
-    search = st.text_input(
-        "Buscar (Projeto · Tipo · Lab · Responsável · Obs)",
-        value="", placeholder="Ex.: bentos, biofile, ASSCAF, fulano...",
-    )
-with tc2:
-    sort_label = st.selectbox("Ordenar por", list(SORT_OPTIONS.keys()), index=0)
+with st.expander("Busca, filtros e ordenação", expanded=False):
+    tc1, tc2 = st.columns([2.5, 1.5])
+    with tc1:
+        search = st.text_input(
+            "Buscar (Projeto · Tipo · Lab · Responsável · Obs)",
+            value="", placeholder="Ex.: bentos, biofile, ASSCAF, fulano...",
+            key="lab_search_v2",
+        )
+    with tc2:
+        sort_label = st.selectbox("Ordenar por", list(SORT_OPTIONS.keys()), index=0, key="lab_sort_v2")
 
-rc1, rc2, rc3, rc4 = st.columns([1.2, 1.2, 1.2, 1.4])
-with rc1:
-    f_types = st.multiselect("Tipo de amostra", type_names_sorted, default=[])
-with rc2:
-    f_labs = st.multiselect("Laboratório", labs_all, default=[])
-with rc3:
-    f_people = st.multiselect("Responsável", people_all, default=[])
-with rc4:
-    sit_options = ["🔴 Atraso", "🟡 Pendente", "🔵 Em análise", "🟢 Concluído"]
-    f_sit = st.multiselect("Situação", sit_options, default=[])
+    rc1, rc2, rc3, rc4 = st.columns([1.2, 1.2, 1.2, 1.4])
+    with rc1:
+        f_types = st.multiselect("Tipo de amostra", type_names_sorted, default=[], key="lab_types_filter_v2")
+    with rc2:
+        f_labs = st.multiselect("Laboratório", labs_all, default=[], key="lab_labs_filter_v2")
+    with rc3:
+        f_people = st.multiselect("Responsável", people_all, default=[], key="lab_people_filter_v2")
+    with rc4:
+        sit_options = ["🔴 Atraso", "🟡 Pendente", "🔵 Em análise", "🟢 Concluído"]
+        f_sit = st.multiselect("Situação", sit_options, default=[], key="lab_situation_filter_v2")
 
 if f_types:
     df_f = df_f[df_f["sample_types_list"].apply(lambda lst: any(t in lst for t in f_types))].reset_index(drop=True)
@@ -608,7 +622,7 @@ if df_f.empty:
     st.info(
         f"Nenhuma amostra corresponde aos filtros/busca atuais. "
         f"Existem **{len(df)}** entrega(s) cadastrada(s) no total — "
-        "tente o atalho **Tudo**, ampliar o período ou ativar *Incluir sem previsão*."
+        "limpe os filtros opcionais ou revise a busca digitada."
     )
     st.stop()
 
