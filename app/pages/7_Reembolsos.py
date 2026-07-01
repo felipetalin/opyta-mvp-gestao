@@ -776,20 +776,17 @@ pending_df = df_f[df_f["status"] == "PENDENTE"]
 paid_df = df_f[df_f["status"] == "PAGO"]
 open_df = df_f[df_f["status"].isin(["PENDENTE", "APROVADO"])]
 overdue_df = df_f[df_f["__situacao"] == SITUATION_LABEL["ATRASADO"]]
-valid_ticket_df = df_f[df_f["status"] != "GLOSADO"]
 
 total_pending = float(pending_df["amount"].sum())
 total_paid = float(paid_df["amount"].sum())
 qty_pending = int(len(pending_df))
 qty_overdue = int(len(overdue_df))
-ticket_avg = float(valid_ticket_df["amount"].mean()) if not valid_ticket_df.empty else 0.0
 
-k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Total pendente de reembolso", _brl(total_pending))
-k2.metric("Total pago", _brl(total_paid))
-k3.metric("Despesas pendentes", qty_pending)
-k4.metric("Despesas atrasadas", qty_overdue)
-k5.metric("Ticket medio por lancamento", _brl(ticket_avg))
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("🟡 Total pendente de reembolso", _brl(total_pending))
+k2.metric("🟢 Total pago", _brl(total_paid))
+k3.metric("🟡 Despesas pendentes", qty_pending)
+k4.metric("🔴 Despesas atrasadas", qty_overdue)
 
 rp1, rp2 = st.columns(2)
 with rp1:
