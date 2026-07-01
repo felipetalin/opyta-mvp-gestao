@@ -120,6 +120,21 @@ def _api_error_message(e: Exception) -> str:
         return "Erro desconhecido."
 
 
+def _is_missing_reimbursement_schema(e: Exception) -> bool:
+    msg = _api_error_message(e)
+    return "PGRST205" in msg and "reimbursement" in msg
+
+
+def _show_missing_schema_notice(e: Exception) -> None:
+    st.error("O modulo de Reembolsos ja esta publicado, mas a migration ainda nao foi aplicada no Supabase.")
+    st.markdown(
+        "Aplique o arquivo `migrations/2026_07_01_reimbursements.sql` no **SQL Editor** do Supabase "
+        "e depois recarregue esta pagina."
+    )
+    with st.expander("Detalhe tecnico"):
+        st.code(_api_error_message(e))
+
+
 def norm(x) -> str:
     return ("" if x is None else str(x)).strip()
 
@@ -387,9 +402,11 @@ try:
     projects_df = load_projects(cache_key)
     categories_df = load_categories(cache_key)
 except Exception as e:
-    st.error("Nao foi possivel carregar o modulo de Reembolsos.")
-    st.caption("Confira se a migracao `2026_07_01_reimbursements.sql` ja foi aplicada no Supabase.")
-    st.code(_api_error_message(e))
+    if _is_missing_reimbursement_schema(e):
+        _show_missing_schema_notice(e)
+    else:
+        st.error("Nao foi possivel carregar o modulo de Reembolsos.")
+        st.code(_api_error_message(e))
     st.stop()
 
 people_options: dict[str, str] = {}
@@ -541,9 +558,11 @@ try:
     with st.spinner("Carregando reembolsos..."):
         df = load_reimbursements(cache_key)
 except Exception as e:
-    st.error("Erro ao carregar reembolsos.")
-    st.caption("Confira se a migracao `2026_07_01_reimbursements.sql` ja foi aplicada no Supabase.")
-    st.code(_api_error_message(e))
+    if _is_missing_reimbursement_schema(e):
+        _show_missing_schema_notice(e)
+    else:
+        st.error("Erro ao carregar reembolsos.")
+        st.code(_api_error_message(e))
     st.stop()
 
 if df.empty:

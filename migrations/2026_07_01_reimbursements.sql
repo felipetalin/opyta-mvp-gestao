@@ -326,3 +326,6 @@ create policy p_reimbursement_receipts_update on storage.objects
 create policy p_reimbursement_receipts_delete on storage.objects
   for delete to authenticated
   using (bucket_id = 'reimbursement-receipts');
+
+-- Atualiza o schema cache do PostgREST apos criar tabelas/views/funcoes.
+notify pgrst, 'reload schema';
