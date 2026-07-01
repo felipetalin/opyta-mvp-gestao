@@ -648,15 +648,16 @@ df["__situation_priority"] = df["__situacao"].map(SITUATION_PRIORITY).fillna(99)
 # ==========================================================
 st.subheader("Filtros")
 
-default_from = _month_start(today)
-default_to = today
+expense_dates = [d for d in df["expense_date_dt"].tolist() if isinstance(d, date)]
+default_from = min(expense_dates) if expense_dates else _month_start(today)
+default_to = max(expense_dates) if expense_dates else today
 
 with st.container(border=True):
     f1, f2, f3, f4, f5 = st.columns([1.1, 1.1, 1.7, 1.8, 1.5])
     with f1:
-        date_from = st.date_input("De", value=default_from, format="DD/MM/YYYY", key="reimb_filter_from")
+        date_from = st.date_input("De", value=default_from, format="DD/MM/YYYY", key="reimb_filter_from_v2")
     with f2:
-        date_to = st.date_input("Ate", value=default_to, format="DD/MM/YYYY", key="reimb_filter_to")
+        date_to = st.date_input("Ate", value=default_to, format="DD/MM/YYYY", key="reimb_filter_to_v2")
     with f3:
         f_collaborators = st.multiselect(
             "Colaborador",
@@ -698,13 +699,20 @@ with st.container(border=True):
     with g4:
         sort_label = st.selectbox("Ordenar por", list(SORT_OPTIONS.keys()), index=0)
 
-    h1, h2 = st.columns([1.0, 4.0])
+    h1, h2, h3 = st.columns([1.0, 1.2, 3.8])
     with h1:
         if st.button("Recarregar"):
             clear_caches()
             _reset_editor_state()
             st.rerun()
     with h2:
+        if st.button("Mostrar todos"):
+            st.session_state["reimb_filter_from_v2"] = default_from
+            st.session_state["reimb_filter_to_v2"] = default_to
+            clear_caches()
+            _reset_editor_state()
+            st.rerun()
+    with h3:
         st.caption(
             "Atraso e calculado automaticamente pelo Prazo de pagamento. Pago e Glosado encerram a pendencia operacional."
         )
@@ -754,7 +762,14 @@ st.divider()
 st.subheader("Indicadores")
 
 if df_f.empty:
-    st.info("Nenhum lancamento corresponde aos filtros atuais.")
+    if expense_dates:
+        st.info(
+            "Nenhum lancamento corresponde aos filtros atuais. "
+            f"Existem {len(df)} lancamento(s) cadastrados entre "
+            f"{default_from.strftime('%d/%m/%Y')} e {default_to.strftime('%d/%m/%Y')}."
+        )
+    else:
+        st.info("Nenhum lancamento corresponde aos filtros atuais.")
     st.stop()
 
 pending_df = df_f[df_f["status"] == "PENDENTE"]
