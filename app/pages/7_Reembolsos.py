@@ -70,16 +70,34 @@ ALLOWED_EXTS = {".pdf", ".jpg", ".jpeg", ".png"}
 
 STATUS_OPTIONS = ["PENDENTE", "APROVADO", "PAGO", "GLOSADO"]
 STATUS_LABEL = {
-    "PENDENTE": "Pendente",
-    "APROVADO": "Aprovado",
-    "PAGO": "Pago",
-    "GLOSADO": "Glosado",
+    "PENDENTE": "🟡 Pendente",
+    "APROVADO": "🔵 Aprovado",
+    "PAGO": "🟢 Pago",
+    "GLOSADO": "⚫ Glosado",
 }
 LABEL_TO_STATUS = {v: k for k, v in STATUS_LABEL.items()}
+LABEL_TO_STATUS.update(
+    {
+        "Pendente": "PENDENTE",
+        "Aprovado": "APROVADO",
+        "Pago": "PAGO",
+        "Glosado": "GLOSADO",
+    }
+)
+
+SITUATION_OPTIONS = ["ATRASADO", "PENDENTE", "APROVADO", "PAGO", "GLOSADO"]
+SITUATION_LABEL = {
+    "ATRASADO": "🔴 Atrasado",
+    "PENDENTE": "🟡 Pendente",
+    "APROVADO": "🔵 Aprovado",
+    "PAGO": "🟢 Pago",
+    "GLOSADO": "⚫ Glosado",
+}
 
 EVENT_LABEL = {
     "CREATED": "Lancamento criado",
     "STATUS_CHANGE": "Status alterado",
+    "DUE_DATE_CHANGE": "Prazo de pagamento alterado",
     "PAYMENT_DATE_CHANGE": "Data de pagamento alterada",
     "UPDATED": "Campos atualizados",
     "ATTACHMENT_ADDED": "Comprovante anexado",
@@ -89,14 +107,24 @@ EVENT_LABEL = {
 SORT_OPTIONS = {
     "Data da despesa (mais recente)": ("expense_date", False),
     "Data da despesa (mais antiga)": ("expense_date", True),
+    "Prazo de pagamento (mais proximo)": ("due_date", True),
+    "Prazo de pagamento (mais distante)": ("due_date", False),
     "Valor (maior primeiro)": ("amount", False),
     "Valor (menor primeiro)": ("amount", True),
+    "Situacao": ("__situation_priority", True),
     "Status": ("__status_priority", True),
     "Atualizado recentemente": ("updated_at", False),
     "Colaborador (A-Z)": ("collaborator_name", True),
     "Projeto (A-Z)": ("project_code", True),
 }
 STATUS_PRIORITY = {"PENDENTE": 0, "APROVADO": 1, "PAGO": 2, "GLOSADO": 3}
+SITUATION_PRIORITY = {
+    SITUATION_LABEL["ATRASADO"]: 0,
+    SITUATION_LABEL["PENDENTE"]: 1,
+    SITUATION_LABEL["APROVADO"]: 2,
+    SITUATION_LABEL["PAGO"]: 3,
+    SITUATION_LABEL["GLOSADO"]: 4,
+}
 
 
 # ==========================================================
@@ -172,6 +200,21 @@ def to_date(x):
 
 def _brl(v: float) -> str:
     return f"R$ {float(v):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def situation_for(status: str | None, due_date, today_: date) -> str:
+    status_norm = (status or "PENDENTE").strip().upper()
+    if status_norm == "PAGO":
+        return SITUATION_LABEL["PAGO"]
+    if status_norm == "GLOSADO":
+        return SITUATION_LABEL["GLOSADO"]
+
+    due = to_date(due_date)
+    if due is not None and due < today_:
+        return SITUATION_LABEL["ATRASADO"]
+    if status_norm == "APROVADO":
+        return SITUATION_LABEL["APROVADO"]
+    return SITUATION_LABEL["PENDENTE"]
 
 
 def _safe_text_list(series: pd.Series, default: str = "") -> list[str]:
@@ -491,12 +534,14 @@ with st.expander("Novo reembolso / despesa interna", expanded=False):
                     index=0,
                 )
 
-            b1, b2, b3 = st.columns([1.8, 1.0, 1.0])
+            b1, b2, b3, b4 = st.columns([1.8, 1.0, 1.0, 1.0])
             with b1:
                 new_category = st.selectbox("Categoria da despesa *", list(category_options.keys()))
             with b2:
                 new_amount = st.number_input("Valor (R$) *", min_value=0.01, value=0.01, step=10.0)
             with b3:
+                new_due_date = st.date_input("Prazo de pagamento *", value=date.today(), format="DD/MM/YYYY")
+            with b4:
                 new_payment_date = st.date_input("Data do pagamento", value=None, format="DD/MM/YYYY")
 
             new_description = st.text_input("Descricao *", placeholder="Ex.: hospedagem durante vistoria de campo")
@@ -510,10 +555,13 @@ with st.expander("Novo reembolso / despesa interna", expanded=False):
             submitted = st.form_submit_button("Salvar lancamento", type="primary")
             if submitted:
                 status_new = LABEL_TO_STATUS.get(new_status_label, "PENDENTE")
+                due_date = to_date(new_due_date)
                 pay_date = to_date(new_payment_date)
 
                 if norm(new_description) == "":
                     st.error("Descricao e obrigatoria.")
+                elif due_date is None:
+                    st.error("Prazo de pagamento e obrigatorio.")
                 elif status_new == "PAGO" and pay_date is None:
                     st.error("Despesas com status Pago precisam de Data do pagamento.")
                 else:
@@ -525,6 +573,7 @@ with st.expander("Novo reembolso / despesa interna", expanded=False):
                         "description": norm(new_description),
                         "amount": float(new_amount),
                         "status": status_new,
+                        "due_date": due_date.isoformat(),
                         "payment_date": pay_date.isoformat() if status_new == "PAGO" and pay_date else None,
                         "observations": norm_text(new_observations),
                         "created_by_email": user_email or None,
@@ -569,9 +618,12 @@ if df.empty:
     st.info("Nenhum reembolso cadastrado ainda. Use **Novo reembolso / despesa interna** acima.")
     st.stop()
 
+today = date.today()
+
 for col, default in [
     ("receipt_count", 0),
     ("observations", ""),
+    ("due_date", None),
     ("payment_date", None),
     ("updated_at", None),
     ("created_at", None),
@@ -581,9 +633,14 @@ for col, default in [
 
 df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
 df["expense_date_dt"] = pd.to_datetime(df["expense_date"], errors="coerce").dt.date
+df["due_date_dt"] = pd.to_datetime(df["due_date"], errors="coerce").dt.date
+df["due_date_dt"] = df["due_date_dt"].where(df["due_date_dt"].notna(), df["expense_date_dt"])
+df["due_date"] = df["due_date_dt"]
 df["payment_date_dt"] = pd.to_datetime(df["payment_date"], errors="coerce").dt.date
 df["status"] = df["status"].fillna("PENDENTE").astype(str).str.upper()
+df["__situacao"] = [situation_for(s, d, today) for s, d in zip(df["status"].tolist(), df["due_date_dt"].tolist())]
 df["__status_priority"] = df["status"].map(STATUS_PRIORITY).fillna(99).astype(int)
+df["__situation_priority"] = df["__situacao"].map(SITUATION_PRIORITY).fillna(99).astype(int)
 
 
 # ==========================================================
@@ -591,7 +648,6 @@ df["__status_priority"] = df["status"].map(STATUS_PRIORITY).fillna(99).astype(in
 # ==========================================================
 st.subheader("Filtros")
 
-today = date.today()
 default_from = _month_start(today)
 default_to = today
 
@@ -620,20 +676,26 @@ with st.container(border=True):
             default=[],
         )
 
-    g1, g2, g3 = st.columns([1.8, 2.2, 1.4])
+    g1, g2, g3, g4 = st.columns([1.4, 1.6, 2.2, 1.4])
     with g1:
+        f_situation_labels = st.multiselect(
+            "Situacao",
+            [SITUATION_LABEL[s] for s in SITUATION_OPTIONS],
+            default=[],
+        )
+    with g2:
         f_categories = st.multiselect(
             "Categoria",
             sorted({x for x in _safe_text_list(df["category_name"]) if x}),
             default=[],
         )
-    with g2:
+    with g3:
         search = st.text_input(
             "Buscar",
             value="",
             placeholder="Descricao, observacao, colaborador, projeto...",
         )
-    with g3:
+    with g4:
         sort_label = st.selectbox("Ordenar por", list(SORT_OPTIONS.keys()), index=0)
 
     h1, h2 = st.columns([1.0, 4.0])
@@ -644,7 +706,7 @@ with st.container(border=True):
             st.rerun()
     with h2:
         st.caption(
-            "Passivo atual considera somente despesas com status Pendente, conforme regra definida."
+            "Atraso e calculado automaticamente pelo Prazo de pagamento. Pago e Glosado encerram a pendencia operacional."
         )
 
 if date_from > date_to:
@@ -662,6 +724,8 @@ if f_categories:
 if f_status_labels:
     selected_status = [LABEL_TO_STATUS.get(s, s) for s in f_status_labels]
     mask &= df["status"].isin(selected_status)
+if f_situation_labels:
+    mask &= df["__situacao"].isin(f_situation_labels)
 
 df_f = df.loc[mask].copy().reset_index(drop=True)
 
@@ -673,7 +737,8 @@ if search.strip():
         + df_f["collaborator_name"].fillna("").astype(str).str.lower() + " | "
         + df_f["project_code"].fillna("").astype(str).str.lower() + " | "
         + df_f["project_name"].fillna("").astype(str).str.lower() + " | "
-        + df_f["category_name"].fillna("").astype(str).str.lower()
+        + df_f["category_name"].fillna("").astype(str).str.lower() + " | "
+        + df_f["__situacao"].fillna("").astype(str).str.lower()
     )
     df_f = df_f.loc[haystack.str.contains(q, na=False, regex=False)].reset_index(drop=True)
 
@@ -694,48 +759,52 @@ if df_f.empty:
 
 pending_df = df_f[df_f["status"] == "PENDENTE"]
 paid_df = df_f[df_f["status"] == "PAGO"]
+open_df = df_f[df_f["status"].isin(["PENDENTE", "APROVADO"])]
+overdue_df = df_f[df_f["__situacao"] == SITUATION_LABEL["ATRASADO"]]
 valid_ticket_df = df_f[df_f["status"] != "GLOSADO"]
 
 total_pending = float(pending_df["amount"].sum())
 total_paid = float(paid_df["amount"].sum())
 qty_pending = int(len(pending_df))
+qty_overdue = int(len(overdue_df))
 ticket_avg = float(valid_ticket_df["amount"].mean()) if not valid_ticket_df.empty else 0.0
 
-k1, k2, k3, k4 = st.columns(4)
+k1, k2, k3, k4, k5 = st.columns(5)
 k1.metric("Total pendente de reembolso", _brl(total_pending))
 k2.metric("Total pago", _brl(total_paid))
 k3.metric("Despesas pendentes", qty_pending)
-k4.metric("Ticket medio por lancamento", _brl(ticket_avg))
+k4.metric("Despesas atrasadas", qty_overdue)
+k5.metric("Ticket medio por lancamento", _brl(ticket_avg))
 
 rp1, rp2 = st.columns(2)
 with rp1:
     by_collab = (
-        pending_df.groupby("collaborator_name", dropna=False)["amount"]
+        open_df.groupby("collaborator_name", dropna=False)["amount"]
         .sum()
         .sort_values(ascending=False)
         .reset_index()
-        .rename(columns={"collaborator_name": "Colaborador", "amount": "Valor pendente"})
+        .rename(columns={"collaborator_name": "Colaborador", "amount": "Valor em aberto"})
     )
     if by_collab.empty:
-        st.caption("Sem pendencias por colaborador nos filtros atuais.")
+        st.caption("Sem valores em aberto por colaborador nos filtros atuais.")
     else:
         view = by_collab.copy()
-        view["Valor pendente"] = view["Valor pendente"].apply(_brl)
+        view["Valor em aberto"] = view["Valor em aberto"].apply(_brl)
         st.dataframe(view, use_container_width=True, hide_index=True)
 
 with rp2:
     by_project = (
-        pending_df.groupby("project_code", dropna=False)["amount"]
+        open_df.groupby("project_code", dropna=False)["amount"]
         .sum()
         .sort_values(ascending=False)
         .reset_index()
-        .rename(columns={"project_code": "Projeto", "amount": "Valor pendente"})
+        .rename(columns={"project_code": "Projeto", "amount": "Valor em aberto"})
     )
     if by_project.empty:
-        st.caption("Sem pendencias por projeto nos filtros atuais.")
+        st.caption("Sem valores em aberto por projeto nos filtros atuais.")
     else:
         view = by_project.copy()
-        view["Valor pendente"] = view["Valor pendente"].apply(_brl)
+        view["Valor em aberto"] = view["Valor em aberto"].apply(_brl)
         st.dataframe(view, use_container_width=True, hide_index=True)
 
 
@@ -771,22 +840,22 @@ try:
         .rename("Pagas")
     )
     pending = (
-        dash_df[dash_df["status"] == "PENDENTE"]
+        dash_df[dash_df["status"].isin(["PENDENTE", "APROVADO"])]
         .groupby("expense_month")["amount"]
         .sum()
-        .rename("Pendentes")
+        .rename("Em aberto")
     )
 
     monthly = monthly.set_index("month")
     monthly["Lancadas"] = launched.reindex(monthly.index).fillna(0.0)
     monthly["Pagas"] = paid.reindex(monthly.index).fillna(0.0)
-    monthly["Pendentes"] = pending.reindex(monthly.index).fillna(0.0)
+    monthly["Em aberto"] = pending.reindex(monthly.index).fillna(0.0)
     monthly = monthly.reset_index()
 
     fig_month = go.Figure()
     fig_month.add_bar(x=monthly["month"], y=monthly["Lancadas"], name="Lancadas")
     fig_month.add_trace(go.Scatter(x=monthly["month"], y=monthly["Pagas"], mode="lines+markers", name="Pagas"))
-    fig_month.add_trace(go.Scatter(x=monthly["month"], y=monthly["Pendentes"], mode="lines+markers", name="Pendentes"))
+    fig_month.add_trace(go.Scatter(x=monthly["month"], y=monthly["Em aberto"], mode="lines+markers", name="Em aberto"))
     fig_month.update_layout(
         height=350,
         margin=dict(l=10, r=10, t=15, b=10),
@@ -798,19 +867,19 @@ try:
 
     c1, c2 = st.columns(2)
     with c1:
-        st.caption("Ranking de colaboradores por valor pendente")
+        st.caption("Ranking de colaboradores por valor em aberto")
         if by_collab.empty:
             st.caption("Sem dados.")
         else:
-            fig = px.bar(by_collab.head(10), x="Valor pendente", y="Colaborador", orientation="h")
+            fig = px.bar(by_collab.head(10), x="Valor em aberto", y="Colaborador", orientation="h")
             fig.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig, use_container_width=True)
     with c2:
-        st.caption("Ranking de projetos por valor pendente")
+        st.caption("Ranking de projetos por valor em aberto")
         if by_project.empty:
             st.caption("Sem dados.")
         else:
-            fig = px.bar(by_project.head(10), x="Valor pendente", y="Projeto", orientation="h")
+            fig = px.bar(by_project.head(10), x="Valor em aberto", y="Projeto", orientation="h")
             fig.update_layout(height=330, margin=dict(l=10, r=10, t=10, b=10), yaxis=dict(autorange="reversed"))
             st.plotly_chart(fig, use_container_width=True)
 
@@ -834,11 +903,11 @@ try:
             st.plotly_chart(fig, use_container_width=True)
 
     with c4:
-        st.caption("Aging financeiro dos pendentes")
-        aging = pending_df.copy()
+        st.caption("Aging financeiro dos valores em aberto")
+        aging = open_df.copy()
         aging["days_open"] = [
-            (today - d).days if isinstance(d, date) else None
-            for d in aging["expense_date_dt"].tolist()
+            max((today - d).days, 0) if isinstance(d, date) else None
+            for d in aging["due_date_dt"].tolist()
         ]
         bins = [-1, 30, 60, 90, 100000]
         labels = ["0-30", "31-60", "61-90", ">90"]
@@ -878,6 +947,8 @@ def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
             "Descricao": _safe_text_list(_df["description"]),
             "Valor (R$)": pd.to_numeric(_df["amount"], errors="coerce").fillna(0.0).tolist(),
             "Status": [STATUS_LABEL.get(s, s) for s in _safe_text_list(_df["status"])],
+            "Situacao": _safe_text_list(_df["__situacao"]),
+            "Prazo de pagamento": [to_date(x) for x in _df["due_date"].tolist()],
             "Data do pagamento": [to_date(x) for x in _df["payment_date"].tolist()],
             "Observacoes": _safe_text_list(_df["observations"]),
             "Comprovantes": pd.to_numeric(_df["receipt_count"], errors="coerce").fillna(0).astype(int).tolist(),
@@ -942,6 +1013,8 @@ df_edit = pd.DataFrame(
         "Descricao": _safe_text_list(df_f["description"]),
         "Valor (R$)": pd.to_numeric(df_f["amount"], errors="coerce").fillna(0.0).tolist(),
         "Status": [STATUS_LABEL.get(s, s) for s in _safe_text_list(df_f["status"], "PENDENTE")],
+        "Situacao": _safe_text_list(df_f["__situacao"]),
+        "Prazo de pagamento": [to_date(x) for x in df_f["due_date"].tolist()],
         "Data do pagamento": [to_date(x) for x in df_f["payment_date"].tolist()],
         "Observacoes": _safe_text_list(df_f["observations"]),
         "Comprovantes": pd.to_numeric(df_f["receipt_count"], errors="coerce").fillna(0).astype(int).tolist(),
@@ -957,6 +1030,7 @@ editor_signature = hash(
         tuple(f_projects),
         tuple(f_categories),
         tuple(f_status_labels),
+        tuple(f_situation_labels),
         search.strip(),
         sort_label,
     )
@@ -979,6 +1053,8 @@ edited = st.data_editor(
         "Descricao",
         "Valor (R$)",
         "Status",
+        "Situacao",
+        "Prazo de pagamento",
         "Data do pagamento",
         "Observacoes",
         "Comprovantes",
@@ -992,6 +1068,8 @@ edited = st.data_editor(
         "Descricao": st.column_config.TextColumn(width="large"),
         "Valor (R$)": st.column_config.NumberColumn(min_value=0.01, step=10.0, format="R$ %.2f", width="small"),
         "Status": st.column_config.SelectboxColumn(options=[STATUS_LABEL[s] for s in STATUS_OPTIONS], width="small"),
+        "Situacao": st.column_config.TextColumn(disabled=True, width="small"),
+        "Prazo de pagamento": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
         "Data do pagamento": st.column_config.DateColumn(format="DD/MM/YYYY", width="small"),
         "Observacoes": st.column_config.TextColumn(width="large"),
         "Comprovantes": st.column_config.NumberColumn(disabled=True, width="small"),
@@ -1059,6 +1137,7 @@ if save_btn:
             "Descricao",
             "Valor (R$)",
             "Status",
+            "Prazo de pagamento",
             "Data do pagamento",
             "Observacoes",
         ]
@@ -1067,11 +1146,15 @@ if save_btn:
 
         expense_date = to_date(after.loc[i, "Data da despesa"])
         status = LABEL_TO_STATUS.get(norm(after.loc[i, "Status"]), "PENDENTE")
+        due_date = to_date(after.loc[i, "Prazo de pagamento"])
         payment_date = to_date(after.loc[i, "Data do pagamento"])
         amount = float(after.loc[i, "Valor (R$)"] or 0)
 
         if expense_date is None:
             warnings.append(f"{rid}: Data da despesa vazia. Atualizacao ignorada.")
+            continue
+        if due_date is None:
+            warnings.append(f"{rid}: Prazo de pagamento vazio. Atualizacao ignorada.")
             continue
         if amount <= 0:
             warnings.append(f"{rid}: Valor deve ser maior que zero. Atualizacao ignorada.")
@@ -1091,6 +1174,7 @@ if save_btn:
             "description": norm(after.loc[i, "Descricao"]),
             "amount": amount,
             "status": status,
+            "due_date": due_date.isoformat(),
             "payment_date": payment_date.isoformat() if status == "PAGO" and payment_date else None,
             "observations": norm_text(after.loc[i, "Observacoes"]),
             "updated_by_email": user_email or None,
@@ -1126,7 +1210,7 @@ for _, row in df_f.iterrows():
     d = to_date(row.get("expense_date"))
     d_txt = d.strftime("%d/%m/%Y") if d else ""
     label = (
-        f"{d_txt} - {_clean_str(row.get('collaborator_name'))} - "
+        f"{_clean_str(row.get('__situacao'))} - {d_txt} - {_clean_str(row.get('collaborator_name'))} - "
         f"{_clean_str(row.get('project_code'))} - {_brl(float(row.get('amount') or 0))}"
     )
     label_to_id[label] = _clean_str(row.get("id"))
