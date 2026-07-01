@@ -19,7 +19,7 @@ import streamlit as st
 
 from services.auth import require_login
 from services.supabase_client import get_authed_client
-from services.finance_guard import can_finance_write, require_finance_access
+from services.finance_guard import can_finance_write
 
 try:
     from ui.brand import apply_brand, apply_app_chrome, page_header
@@ -49,7 +49,7 @@ require_login()
 sb = get_authed_client()
 cache_key = str(st.session_state.get("access_token") or "no-token")
 
-user_email = require_finance_access(silent=True)
+user_email = (st.session_state.get("user_email") or "").strip().lower()
 can_write = can_finance_write(user_email)
 
 page_header(
