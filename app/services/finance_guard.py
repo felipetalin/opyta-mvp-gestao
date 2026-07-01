@@ -48,7 +48,12 @@ def get_finance_access_policy() -> dict[str, dict[str, bool]]:
     Retorna a política de acesso ao Financeiro.
     Permite override opcional por st.secrets["FINANCE_ACCESS_POLICY"].
     """
-    secrets_policy = _normalize_finance_policy(st.secrets.get("FINANCE_ACCESS_POLICY"))
+    try:
+        configured_policy = st.secrets.get("FINANCE_ACCESS_POLICY")
+    except Exception:
+        configured_policy = None
+
+    secrets_policy = _normalize_finance_policy(configured_policy)
     if secrets_policy:
         return secrets_policy
 

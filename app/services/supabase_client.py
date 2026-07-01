@@ -12,9 +12,13 @@ def _load_env():
 
 
 def _get(key: str) -> str | None:
-    if hasattr(st, "secrets") and key in st.secrets:
-        v = st.secrets.get(key)
-        return str(v) if v is not None else None
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            v = st.secrets.get(key)
+            return str(v) if v is not None else None
+    except Exception:
+        # Sem secrets.toml local: usa .env/variaveis de ambiente.
+        pass
     return os.getenv(key)
 
 

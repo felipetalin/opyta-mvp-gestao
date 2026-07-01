@@ -38,7 +38,8 @@ def login_form():
     if st.button("Entrar", type="primary"):
         try:
             sb = get_anon_client()
-            res = sb.auth.sign_in_with_password({"email": email, "password": password})
+            login_email = str(email or "").strip().lower()
+            res = sb.auth.sign_in_with_password({"email": login_email, "password": password})
 
             session = res.session
             if not session or not session.access_token:
@@ -46,7 +47,7 @@ def login_form():
                 return
 
             user = getattr(res, "user", None) or getattr(session, "user", None)
-            user_email = getattr(user, "email", None) or email
+            user_email = getattr(user, "email", None) or login_email
 
             st.session_state["access_token"] = session.access_token
             st.session_state["refresh_token"] = getattr(session, "refresh_token", None)
@@ -56,7 +57,13 @@ def login_form():
             st.rerun()
 
         except Exception as e:
-            st.error(f"Falha no login: {e}")
+            msg = str(e)
+            if "Invalid login credentials" in msg:
+                st.error(
+                    "Falha no login: o Supabase recusou esse email/senha para o projeto configurado."
+                )
+            else:
+                st.error(f"Falha no login: {e}")
 
 
 def require_login():
