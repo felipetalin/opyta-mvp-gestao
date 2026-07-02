@@ -45,6 +45,23 @@ do vencimento, reaproveitando o Supabase e a automacao via GitHub Actions.
 - A tabela `due_notification_log` ainda precisa ser criada no Supabase antes do
   envio real; em dry-run a ausencia dessa tabela gera apenas aviso tecnico.
 
+## Registro em 2026-07-02
+
+- Dry-run completo com data de referencia `2026-07-02`: o job encontrou 27
+  vencimentos dentro das regras.
+- Nenhum aviso ficou apto a envio direto porque os 7 colaboradores ativos ainda
+  estavam sem `people.email`.
+- A tabela `due_notification_log` ainda nao estava aplicada no Supabase; a API
+  retornou `PGRST205` para `public.due_notification_log`.
+- Teste com `NOTIFICATION_FALLBACK_RECIPIENT=felipetalin@opyta.com.br` montou
+  corretamente um unico e-mail com 27 avisos, sem envio real.
+- Smoke test real via Gmail API para `felipetalin@opyta.com.br` falhou antes do
+  envio com `unauthorized_client`, indicando que a service account ainda nao foi
+  autorizada no Google Workspace para o escopo `gmail.send`.
+- Ao instalar `requirements-sync.txt` localmente, o resolvedor puxou `protobuf 7`,
+  que conflita com Streamlit. O ambiente local foi corrigido para `protobuf<7`, e
+  o arquivo de dependencias passou a fixar `protobuf>=5.29.6,<7`.
+
 ## Checklist para ativar
 
 1. Aplicar `migrations/2026_07_01_due_notifications.sql` no SQL Editor do Supabase.
