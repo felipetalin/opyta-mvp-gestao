@@ -30,6 +30,7 @@ jobs:
       NOTIFICATION_OVERDUE_LOOKBACK_DAYS: "30"
       NOTIFICATION_FROM_EMAIL: "felipetalin@opyta.com.br"
       FALLBACK_OWNER_EMAIL: "felipetalin@opyta.com.br"
+      NOTIFICATION_FORCE_RECIPIENTS: "yurisimoes@opyta.com.br,felipetalin@opyta.com.br"
 
     steps:
       - name: Checkout

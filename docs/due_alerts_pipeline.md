@@ -19,6 +19,8 @@ do vencimento, reaproveitando o Supabase e a automacao via GitHub Actions.
 - Atrasados entram por ate 30 dias de atraso por padrao.
 - Itens concluidos/pagos/cancelados/glosados nao entram no aviso.
 - Os avisos sao agrupados em um e-mail por destinatario.
+- Para a fase atual, os avisos sao centralizados em destinatarios fixos:
+  `yurisimoes@opyta.com.br` e `felipetalin@opyta.com.br`.
 - O envio real registra cada item em `due_notification_log` para evitar duplicidade.
 
 ## Arquivos
@@ -61,11 +63,22 @@ do vencimento, reaproveitando o Supabase e a automacao via GitHub Actions.
 - Ao instalar `requirements-sync.txt` localmente, o resolvedor puxou `protobuf 7`,
   que conflita com Streamlit. O ambiente local foi corrigido para `protobuf<7`, e
   o arquivo de dependencias passou a fixar `protobuf>=5.29.6,<7`.
+- A regra de destinatario foi alterada para atendimento centralizado: todos os
+  avisos vao somente para `yurisimoes@opyta.com.br` e
+  `felipetalin@opyta.com.br`, via `NOTIFICATION_FORCE_RECIPIENTS`.
+- Dry-run com destinatarios fixos em `2026-07-02`: 27 itens unicos de vencimento,
+  54 entregas candidatas, 2 destinatarios e 0 destinatarios faltantes.
+- O sync local tambem precisou atualizar `supabase` para `>=2.27,<3`, pois a
+  versao `2.6.0` nao aceita as chaves novas `sb_secret_...`/`sb_publishable_...`.
+  Foi necessario fixar `websockets>=13,<16` para compatibilidade com o cliente
+  moderno do Supabase.
 
 ## Checklist para ativar
 
 1. Aplicar `migrations/2026_07_01_due_notifications.sql` no SQL Editor do Supabase.
-2. Preencher `people.email` para os colaboradores ativos.
+2. Confirmar que `NOTIFICATION_FORCE_RECIPIENTS` contem apenas:
+   - `yurisimoes@opyta.com.br`
+   - `felipetalin@opyta.com.br`
 3. Garantir que o GitHub tenha os secrets:
    - `SUPABASE_URL`
    - `SUPABASE_SERVICE_ROLE_KEY`
@@ -104,8 +117,10 @@ python scripts/notifications/send_due_alerts.py
 ## Observacoes
 
 - Enquanto `people.email` estiver vazio, os itens aparecem no contador
-  `missing_recipient_count` e nao sao enviados.
+  `missing_recipient_count` e nao sao enviados, exceto quando
+  `NOTIFICATION_FORCE_RECIPIENTS` estiver definido.
 - Para teste controlado sem preencher todos os e-mails, e possivel definir
-  `NOTIFICATION_FALLBACK_RECIPIENT`, mas isso deve ser temporario.
+  `NOTIFICATION_FALLBACK_RECIPIENT`, mas isso deve ser temporario. Para a regra
+  atual, preferir `NOTIFICATION_FORCE_RECIPIENTS`.
 - A agenda do workflow esta em 08:00 BRT em dias uteis, mas fica em dry-run ate a
   virada final da chave.

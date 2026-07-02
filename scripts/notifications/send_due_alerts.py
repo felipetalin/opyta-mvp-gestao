@@ -123,6 +123,18 @@ def parse_csv(value: str | None, default: Iterable[str]) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
+def parse_email_list(value: str | None) -> list[str]:
+    emails: list[str] = []
+    seen: set[str] = set()
+    for raw in parse_csv(value, []):
+        email = raw.strip().lower()
+        if not email or "@" not in email or email in seen:
+            continue
+        emails.append(email)
+        seen.add(email)
+    return emails
+
+
 def parse_windows(value: str | None) -> set[int]:
     raw = parse_csv(value, ["0", "1", "3", "7"])
     return {int(part) for part in raw if part.strip()}
@@ -204,6 +216,7 @@ def add_candidate(
     project_name: str,
     responsible: Person | None,
     fallback_recipient: str,
+    forced_recipients: list[str],
     due_date: date | None,
     today: date,
     windows: set[int],
@@ -217,8 +230,9 @@ def add_candidate(
     alert_type, days_until_due = alert
 
     responsible_name = responsible.name if responsible else ""
-    recipient = (responsible.email if responsible else "") or fallback_recipient
-    if not recipient:
+    recipients = forced_recipients or [((responsible.email if responsible else "") or fallback_recipient)]
+    recipients = [email.strip().lower() for email in recipients if email and email.strip()]
+    if not recipients:
         missing_recipients.append(
             {
                 "source": source,
@@ -230,25 +244,26 @@ def add_candidate(
         )
         return
 
-    candidates.append(
-        NotificationCandidate(
-            source=source,
-            source_id=source_id,
-            title=title,
-            project_code=project_code,
-            project_name=project_name,
-            responsible_name=responsible_name,
-            recipient_email=recipient.lower(),
-            due_date=due_date,
-            alert_type=alert_type,
-            days_until_due=days_until_due,
-            detail=detail,
-            run_date=today,
+    for recipient in recipients:
+        candidates.append(
+            NotificationCandidate(
+                source=source,
+                source_id=source_id,
+                title=title,
+                project_code=project_code,
+                project_name=project_name,
+                responsible_name=responsible_name,
+                recipient_email=recipient,
+                due_date=due_date,
+                alert_type=alert_type,
+                days_until_due=days_until_due,
+                detail=detail,
+                run_date=today,
+            )
         )
-    )
 
 
-def collect_gantt(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient):
+def collect_gantt(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients):
     rows = safe_data(
         sb.table("v_portfolio_tasks")
         .select("task_id,project_id,project_code,project_name,title,status,date_confidence,end_date,assignee_name")
@@ -275,6 +290,7 @@ def collect_gantt(sb, people_by_id, projects, today, windows, overdue_min, max_d
             project_name=clean_text(row.get("project_name")) or project.get("project_name", ""),
             responsible=responsible,
             fallback_recipient=fallback_recipient,
+            forced_recipients=forced_recipients,
             due_date=to_date(row.get("end_date")),
             today=today,
             windows=windows,
@@ -283,7 +299,7 @@ def collect_gantt(sb, people_by_id, projects, today, windows, overdue_min, max_d
     return candidates, missing
 
 
-def collect_laboratorio(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient):
+def collect_laboratorio(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients):
     rows = safe_data(
         sb.table("v_lab_samples")
         .select("sample_id,project_id,project_code,project_name,assignee_id,assignee_name,status,expected_release_date,sample_types_label,lab_name")
@@ -311,6 +327,7 @@ def collect_laboratorio(sb, people_by_id, projects, today, windows, overdue_min,
             project_name=clean_text(row.get("project_name")) or project.get("project_name", ""),
             responsible=responsible,
             fallback_recipient=fallback_recipient,
+            forced_recipients=forced_recipients,
             due_date=to_date(row.get("expected_release_date")),
             today=today,
             windows=windows,
@@ -319,7 +336,7 @@ def collect_laboratorio(sb, people_by_id, projects, today, windows, overdue_min,
     return candidates, missing
 
 
-def collect_produtos(sb, people_by_name, today, windows, overdue_min, max_due, fallback_recipient):
+def collect_produtos(sb, people_by_name, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients):
     select_with_client_due = (
         "task_id,project_code,project_name,product_name,assignee_names,"
         "delivery_status,delivery_date,client_due_date,enterprise,end_date"
@@ -354,6 +371,7 @@ def collect_produtos(sb, people_by_name, today, windows, overdue_min, max_due, f
             project_name=clean_text(row.get("project_name")),
             responsible=responsible,
             fallback_recipient=fallback_recipient,
+            forced_recipients=forced_recipients,
             due_date=due,
             today=today,
             windows=windows,
@@ -362,7 +380,7 @@ def collect_produtos(sb, people_by_name, today, windows, overdue_min, max_due, f
     return candidates, missing
 
 
-def collect_reembolsos(sb, people_by_id, today, windows, overdue_min, max_due, fallback_recipient):
+def collect_reembolsos(sb, people_by_id, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients):
     rows = safe_data(
         sb.table("v_reimbursements")
         .select("id,due_date,collaborator_id,collaborator_name,project_code,project_name,category_name,description,amount,status")
@@ -395,6 +413,7 @@ def collect_reembolsos(sb, people_by_id, today, windows, overdue_min, max_due, f
             project_name=clean_text(row.get("project_name")),
             responsible=responsible,
             fallback_recipient=fallback_recipient,
+            forced_recipients=forced_recipients,
             due_date=to_date(row.get("due_date")),
             today=today,
             windows=windows,
@@ -558,6 +577,7 @@ def main() -> int:
     max_due = today + timedelta(days=max_window)
     sources = {part.lower() for part in parse_csv(os.getenv("NOTIFICATION_SOURCES"), SOURCE_LABELS.keys())}
     fallback_recipient = clean_text(os.getenv("NOTIFICATION_FALLBACK_RECIPIENT")).lower()
+    forced_recipients = parse_email_list(os.getenv("NOTIFICATION_FORCE_RECIPIENTS"))
 
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
@@ -572,10 +592,10 @@ def main() -> int:
     all_missing: list[dict[str, str]] = []
 
     collectors = {
-        "gantt": lambda: collect_gantt(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient),
-        "laboratorio": lambda: collect_laboratorio(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient),
-        "produtos": lambda: collect_produtos(sb, people_by_name, today, windows, overdue_min, max_due, fallback_recipient),
-        "reembolsos": lambda: collect_reembolsos(sb, people_by_id, today, windows, overdue_min, max_due, fallback_recipient),
+        "gantt": lambda: collect_gantt(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients),
+        "laboratorio": lambda: collect_laboratorio(sb, people_by_id, projects, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients),
+        "produtos": lambda: collect_produtos(sb, people_by_name, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients),
+        "reembolsos": lambda: collect_reembolsos(sb, people_by_id, today, windows, overdue_min, max_due, fallback_recipient, forced_recipients),
     }
 
     for source, collector in collectors.items():
@@ -591,13 +611,24 @@ def main() -> int:
     existing = fetch_existing_keys(sb, [c.notification_key for c in all_candidates], dry_run=dry_run)
     candidates = [candidate for candidate in all_candidates if candidate.notification_key not in existing]
     grouped = group_by_recipient(candidates)
+    unique_due_items = {
+        (candidate.source, candidate.source_id, candidate.alert_type, candidate.days_until_due, candidate.due_date.isoformat())
+        for candidate in all_candidates
+    }
+    unique_due_items.update(
+        (item.get("source", ""), item.get("source_id", ""), item.get("due_date", ""))
+        for item in all_missing
+    )
 
     stats = {
         "dry_run": dry_run,
         "today": today.isoformat(),
         "windows_days": sorted(windows),
         "overdue_lookback_days": overdue_lookback,
-        "due_matches_total": len(all_candidates) + len(all_missing),
+        "recipient_mode": "forced" if forced_recipients else "responsible",
+        "forced_recipients": forced_recipients,
+        "due_items_total": len(unique_due_items),
+        "candidate_deliveries_total": len(all_candidates) + len(all_missing),
         "candidates_with_recipient": len(all_candidates),
         "already_sent": len(existing),
         "candidates_to_send": len(candidates),
