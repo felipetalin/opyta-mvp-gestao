@@ -73,6 +73,25 @@ do vencimento, reaproveitando o Supabase e a automacao via GitHub Actions.
   Foi necessario fixar `websockets>=13,<16` para compatibilidade com o cliente
   moderno do Supabase.
 
+## Registro em 2026-07-02 - tentativa de seguir para envio real
+
+- A verificacao no Supabase ainda retornou `PGRST205` para
+  `public.due_notification_log`, confirmando que a migration
+  `migrations/2026_07_01_due_notifications.sql` ainda nao foi aplicada.
+- Nao ha `supabase` CLI, `gh` CLI, `psql`, `DATABASE_URL`, `POSTGRES_URL` ou RPC
+  `exec_sql` disponivel neste ambiente; portanto, a aplicacao da migration ainda
+  precisa ser feita pelo SQL Editor do Supabase.
+- Smoke test real de Gmail para `felipetalin@opyta.com.br` ainda falhou antes do
+  envio com `unauthorized_client`.
+- Service account testada:
+  - `client_email`: `opyta-gcal-bot@api-calendar-486417.iam.gserviceaccount.com`
+  - `client_id`: `113323402794566274776`
+- Escopo que precisa ser liberado no Admin do Google Workspace:
+  - `https://www.googleapis.com/auth/gmail.send`
+- Enquanto esses dois pontos externos nao forem concluidos, manter o envio real
+  bloqueado. Dry-run permanece funcional e validado com os dois destinatarios
+  fixos.
+
 ## Checklist para ativar
 
 1. Aplicar `migrations/2026_07_01_due_notifications.sql` no SQL Editor do Supabase.
