@@ -342,7 +342,10 @@ period_presets: list[tuple[str, date | None, date | None]] = [
     (f"Mês anterior + atual ({month_label(prev_first)} + {month_label(cur_first)})", prev_start, cur_end),
 ]
 period_labels = [p[0] for p in period_presets]
-default_period_idx = 1 if len(period_labels) > 1 else 0
+default_period_idx = next(
+    (i for i, label in enumerate(period_labels) if label.startswith("Mês anterior + atual")),
+    1 if len(period_labels) > 1 else 0,
+)
 
 fc1, fc2, fc3, fc4 = st.columns([1.4, 1.4, 1.7, 1.1])
 with fc1:
