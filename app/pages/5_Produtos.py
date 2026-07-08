@@ -83,6 +83,15 @@ UI_STATUS_TO_DB = {
     "CONCLUIDO": "ENTREGUE",
 }
 STATUS_PRIORITY = {s: i for i, s in enumerate(DELIVERY_STATUS_OPTIONS)}
+PRODUCT_USE_SCOPE_OPTIONS = [
+    "Todos",
+    "Liberados",
+    "Travados",
+]
+PRODUCT_USE_LABEL = {
+    "LIBERADO": "🟢 Liberado",
+    "TRAVADO": "🔒 Travado",
+}
 
 DELIVERY_DATE_STATUS = {
     "SEM_PRAZO": "⚪ Sem prazo",
@@ -176,6 +185,10 @@ def delivery_status_for(deadline, delivery_date, today_: date) -> str:
     if prazo is None or entrega <= prazo:
         return DELIVERY_DATE_STATUS["ENTREGUE_NO_PRAZO"]
     return DELIVERY_DATE_STATUS["ENTREGUE_COM_ATRASO"]
+
+
+def product_use_status(status_ui: str | None) -> str:
+    return "LIBERADO" if status_ui == "CONCLUIDO" else "TRAVADO"
 
 
 def apply_data_editor_state(base: pd.DataFrame, returned: pd.DataFrame, key: str) -> pd.DataFrame:
@@ -302,6 +315,7 @@ today = date.today()
 
 status_all = safe_text_list(df["delivery_status"], "NAO_INICIADO")
 df["delivery_status_ui"] = [to_ui_status(s) for s in status_all]
+df["product_use_status"] = [product_use_status(s) for s in df["delivery_status_ui"].tolist()]
 
 
 # ==========================================================
@@ -343,7 +357,7 @@ with fc2:
 with fc3:
     sel_period = st.selectbox("Atalho (período)", period_labels, index=default_period_idx)
 with fc4:
-    only_pending = st.toggle("Apenas não concluídos", value=False)
+    f_product_use_scope = st.selectbox("Uso", PRODUCT_USE_SCOPE_OPTIONS, index=0)
 
 chosen = next(p for p in period_presets if p[0] == sel_period)
 if chosen[0] != "(manual)":
@@ -361,8 +375,10 @@ if f_projects:
     mask &= df["project_code"].isin(f_projects)
 if f_status:
     mask &= df["delivery_status_ui"].isin(f_status)
-if only_pending:
-    mask &= df["delivery_status_ui"] != "CONCLUIDO"
+if f_product_use_scope == "Liberados":
+    mask &= df["product_use_status"] == "LIBERADO"
+elif f_product_use_scope == "Travados":
+    mask &= df["product_use_status"] == "TRAVADO"
 
 end_dates = pd.to_datetime(df["end_date"], errors="coerce").dt.date
 mask &= end_dates.between(p_start, p_end)
@@ -371,19 +387,20 @@ df_f = df.loc[mask].reset_index(drop=True)
 df_f["__client_due_date"] = [to_date(x) for x in client_due_series(df_f).tolist()]
 
 st.caption(f"Quantitativo do período: **{p_start.strftime('%d/%m/%Y')} – {p_end.strftime('%d/%m/%Y')}**")
-qm1, qm2, qm3, qm4, qm5 = st.columns(5)
+qm1, qm2, qm3, qm4, qm5, qm6 = st.columns(6)
 qm1.metric("Total", len(df_f))
 qm2.metric(STATUS_LABEL["NAO_INICIADO"], int((df_f["delivery_status_ui"] == "NAO_INICIADO").sum()))
 qm3.metric(STATUS_LABEL["EM_ELABORACAO"], int((df_f["delivery_status_ui"] == "EM_ELABORACAO").sum()))
 qm4.metric(STATUS_LABEL["EM_REVISAO"], int((df_f["delivery_status_ui"] == "EM_REVISAO").sum()))
 qm5.metric(STATUS_LABEL["CONCLUIDO"], int((df_f["delivery_status_ui"] == "CONCLUIDO").sum()))
+qm6.metric(PRODUCT_USE_LABEL["TRAVADO"], int((df_f["product_use_status"] == "TRAVADO").sum()))
 
 
 # ==========================================================
 # Tabela editável
 # ==========================================================
 st.subheader("Produtos")
-st.caption("Edição rápida e inline para acompanhamento operacional.")
+st.caption("Tabela completa por padrão. Produtos não concluídos ficam marcados como travados para uso/entrega.")
 
 SORT_OPTIONS = {
     "Prazo de entrega ao cliente (mais próximo primeiro)": ("__client_due_date", True),
@@ -395,6 +412,7 @@ SORT_OPTIONS = {
     "Projeto (A→Z)": ("project_code", True),
     "Produto (A→Z)": ("product_name", True),
     "Status do produto": ("__status_priority", True),
+    "Uso operacional": ("__use_priority", True),
     "Atualizado recentemente": ("tracking_updated_at", False),
 }
 
@@ -422,6 +440,7 @@ if search.strip():
 df_f["__status_priority"] = (
     df_f["delivery_status_ui"].map(STATUS_PRIORITY).fillna(99).astype(int)
 )
+df_f["__use_priority"] = df_f["product_use_status"].map({"TRAVADO": 0, "LIBERADO": 1}).fillna(99).astype(int)
 sort_col, sort_asc = SORT_OPTIONS[sort_label]
 if sort_col in df_f.columns and not df_f.empty:
     df_f = df_f.sort_values(by=sort_col, ascending=sort_asc, na_position="last").reset_index(drop=True)
@@ -446,6 +465,7 @@ def _build_export_df(_df: pd.DataFrame) -> pd.DataFrame:
             if "assignee_names" in _df.columns else [""] * len(_df)
         ),
         "Status do produto": [STATUS_LABEL.get(s, s) for s in safe_text_list(_df["delivery_status_ui"])],
+        "Uso": [PRODUCT_USE_LABEL.get(s, s) for s in safe_text_list(_df["product_use_status"])],
         "Prazo de entrega interna": [to_date(x) for x in _df["end_date"].tolist()],
         "Prazo de entrega ao cliente": [to_date(x) for x in client_due_series(_df).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in _df["delivery_date"].tolist()],
@@ -493,6 +513,7 @@ df_show = pd.DataFrame(
         "Produto": safe_text_list(df_f["product_name"]),
         "Responsável": safe_text_list(resp_col),
         "Status do produto": status_labels,
+        "Uso": [PRODUCT_USE_LABEL.get(s, s) for s in safe_text_list(df_f["product_use_status"])],
         "Prazo de entrega interna": [to_date(x) for x in df_f["end_date"].tolist()],
         "Prazo de entrega ao cliente": [to_date(x) for x in client_due_series(df_f).tolist()],
         "Data de entrega ao cliente": [to_date(x) for x in df_f["delivery_date"].tolist()],
@@ -517,9 +538,10 @@ status_label_options = [STATUS_LABEL[s] for s in DELIVERY_STATUS_OPTIONS]
 _editor_signature = hash(
     (
         tuple(f_projects), tuple(f_status),
-        sel_period, p_start, p_end, only_pending, sort_label, search.strip(),
+        sel_period, p_start, p_end, f_product_use_scope, sort_label, search.strip(),
         tuple(ids),
         tuple(str(x) for x in df_show["Status do produto"].tolist()),
+        tuple(str(x) for x in df_show["Uso"].tolist()),
         tuple(str(x) for x in df_show["Prazo de entrega ao cliente"].tolist()),
         tuple(str(x) for x in df_show["Data de entrega ao cliente"].tolist()),
         tuple(str(x) for x in df_show["Obs"].tolist()),
@@ -537,6 +559,7 @@ edited = st.data_editor(
         "Produto": st.column_config.TextColumn(disabled=True, width="large"),
         "Responsável": st.column_config.TextColumn(disabled=True, width="medium"),
         "Status do produto": st.column_config.SelectboxColumn(options=status_label_options, width="medium"),
+        "Uso": st.column_config.TextColumn(disabled=True, width="small"),
         "Prazo de entrega interna": st.column_config.DateColumn(
             format="DD/MM/YYYY",
             disabled=True,
